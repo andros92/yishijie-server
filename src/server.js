@@ -435,6 +435,58 @@ app.get('/api/yishijie/announcements', async (req, res) => {
   }
 })
 
+// ============ 邮箱 ============
+app.get('/api/yishijie/mail/:playerId', async (req, res) => {
+  try {
+    const user = await authUser(req.params.playerId, req.query.deviceFingerprint, req.query.apiKey)
+    if (!user) return json(res, 403, { error: '鉴权失败' })
+    const [rows] = await pool.query(
+      'SELECT id, title, content, coins, claimed, created_at FROM mail WHERE player_id = ? ORDER BY id DESC LIMIT 50',
+      [user.player_id]
+    )
+    return json(res, 200, { success: true, data: rows })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+app.post('/api/yishijie/mail/claim', async (req, res) => {
+  try {
+    const { playerId, deviceFingerprint, apiKey, mailId } = req.body || {}
+    const user = await authUser(playerId, deviceFingerprint, apiKey)
+    if (!user) return json(res, 403, { error: '鉴权失败' })
+    const [rows] = await pool.query('SELECT * FROM mail WHERE id = ? AND player_id = ? LIMIT 1', [mailId, user.player_id])
+    if (!rows.length) return json(res, 404, { error: '邮件不存在' })
+    const mail = rows[0]
+    if (mail.claimed) return json(res, 200, { success: true, already: true })
+    const save = await readSave(user.player_id)
+    if (save && mail.coins > 0) {
+      setCoins(save, getCoins(save) + mail.coins)
+      await writeSave(user.player_id, save)
+    }
+    await pool.query('UPDATE mail SET claimed = 1 WHERE id = ?', [mail.id])
+    return json(res, 200, { success: true, coins: mail.coins })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+// 管理端发邮件（充值/补偿用）
+app.post('/api/yishijie/admin/mail/send', async (req, res) => {
+  try {
+    const { secret, playerId, title, content, coins } = req.body || {}
+    if (secret !== SECRET) return json(res, 403, { error: '管理密钥错误' })
+    if (!playerId || !title) return json(res, 400, { error: '参数不完整' })
+    await pool.query(
+      'INSERT INTO mail (player_id, title, content, coins) VALUES (?, ?, ?, ?)',
+      [playerId, title, content || '', Number(coins) || 0]
+    )
+    return json(res, 200, { success: true })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
 app.get('/api/yishijie/version', async (req, res) => {
   try {
     const [rows] = await pool.query("SELECT svalue FROM settings WHERE skey = 'version' LIMIT 1")
