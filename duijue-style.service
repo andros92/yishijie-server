@@ -1,0 +1,13 @@
+[Unit]
+Description=Yishijie Server (异世界传说)
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/yishijie-server
+ExecStart=/usr/bin/node /opt/yishijie-server/src/server.js
+Restart=always
+RestartSec=3
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

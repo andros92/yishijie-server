@@ -1,0 +1,59 @@
+# 异世界传说 服务端
+
+参照《开箱游戏 / 对决》服务端实现：注册/登录、存档上传下载、交易所（10% 手续费）、充值订单与回调、公告/版本。
+
+## 部署
+
+1. 服务器装 Node 18+ 与 MySQL 8。
+2. 建库：`mysql -u root -p < schema.sql`
+3. 建服务账号并授权：
+   ```sql
+   CREATE USER 'yishijie'@'localhost' IDENTIFIED BY '你的密码';
+   GRANT ALL ON yishijie.* TO 'yishijie'@'localhost';
+   ```
+4. `cp .env.example .env` 并填写（端口建议 5402）。
+5. `npm install && npm start`
+
+systemd 参考（与 duijue-server.service 同款）：
+```ini
+[Unit]
+Description=Yishijie Server
+After=network.target
+[Service]
+WorkingDirectory=/opt/yishijie-server
+ExecStart=/usr/bin/node /opt/yishijie-server/src/server.js
+Restart=always
+[Install]
+WantedBy=multi-user.target
+```
+
+## 接口（前缀 /api/yishijie）
+
+- `POST /register` {playerName, deviceFingerprint, phoneFingerprint?} → {playerId, playerName, apiKey, isNew}
+- `POST /login` {deviceFingerprint, phoneFingerprint?} → {playerId, playerName}
+- `GET /saves/:playerId?deviceFingerprint=&apiKey=` → {data}
+- `POST /saves/:playerId` {deviceFingerprint, apiKey, data} → 覆盖存档
+- `POST /exchange/list` 挂单（自动从卖家存档扣除物品）
+- `GET /exchange/listings?page=&size=` 在售列表
+- `POST /exchange/buy` 购买（买家存档扣金币、卖家存档收金币、物品转给买家）
+- `POST /exchange/cancel` 撤单（物品退回卖家存档）
+- `GET /exchange/history?playerId=` 成交记录
+- `POST /recharge/order` 创建充值订单
+- `POST /recharge/callback` 支付回调（校验 XS-Sign）
+- `POST /admin/mark-paid` 手动确认订单到账（测试用，需管理密钥）
+- `GET /announcements` 公告
+- `GET /version` 版本号
+- `GET /health` 健康检查
+
+## 存档格式
+
+手环端把整包存档上传为 JSON，服务端原样保存。交易所需要读取存档里的：
+
+```json
+{
+  "bag": { "coin": 0, "wood": 10, "adamant_helmet": 2, "...": 0 },
+  "gear": { "adamant_helmet": [ { "key":"adamant_helmet","quality":"epic","affixes":[],"gem":"","dur":100,"maxDur":100 } ] },
+  "stats": { "hp":100, "hunger":100, "mp":50, "lv":1, "exp":0 },
+  "pets": { "list": [], "active": "" }
+}
+```

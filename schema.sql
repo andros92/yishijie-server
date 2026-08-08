@@ -1,0 +1,85 @@
+-- 异世界传说 服务端数据库（MySQL 8 / utf8mb4）
+CREATE DATABASE IF NOT EXISTS yishijie DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+USE yishijie;
+
+CREATE TABLE IF NOT EXISTS users (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  player_id VARCHAR(20) NOT NULL UNIQUE,
+  player_name VARCHAR(32) NOT NULL,
+  device_fingerprint VARCHAR(128) NOT NULL,
+  phone_fingerprint VARCHAR(128) NOT NULL DEFAULT '',
+  api_key VARCHAR(64) NOT NULL,
+  name_changed TINYINT NOT NULL DEFAULT 0,
+  banned TINYINT NOT NULL DEFAULT 0,
+  ban_reason VARCHAR(255) NOT NULL DEFAULT '',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_device (device_fingerprint),
+  KEY idx_phone (phone_fingerprint)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS saves (
+  player_id VARCHAR(20) NOT NULL PRIMARY KEY,
+  data LONGTEXT NOT NULL,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS exchange_listings (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  seller_id VARCHAR(20) NOT NULL,
+  seller_name VARCHAR(32) NOT NULL,
+  item_key VARCHAR(64) NOT NULL,
+  item_name VARCHAR(64) NOT NULL,
+  item_img VARCHAR(255) NOT NULL DEFAULT '',
+  qty INT NOT NULL DEFAULT 1,
+  price INT NOT NULL DEFAULT 0,
+  quality VARCHAR(16) NOT NULL DEFAULT '',
+  affix_json TEXT NULL,
+  gem VARCHAR(64) NOT NULL DEFAULT '',
+  dur INT NOT NULL DEFAULT 0,
+  max_dur INT NOT NULL DEFAULT 0,
+  broken TINYINT NOT NULL DEFAULT 0,
+  status VARCHAR(16) NOT NULL DEFAULT 'on',  -- on / sold / cancelled
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_status (status),
+  KEY idx_seller (seller_id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS exchange_trade_history (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  listing_id INT NOT NULL,
+  item_key VARCHAR(64) NOT NULL,
+  item_name VARCHAR(64) NOT NULL,
+  qty INT NOT NULL DEFAULT 1,
+  price INT NOT NULL DEFAULT 0,
+  fee INT NOT NULL DEFAULT 0,
+  seller_id VARCHAR(20) NOT NULL,
+  buyer_id VARCHAR(20) NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_seller (seller_id),
+  KEY idx_buyer (buyer_id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS recharge_orders (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  order_id VARCHAR(40) NOT NULL UNIQUE,
+  player_id VARCHAR(20) NOT NULL,
+  amount DECIMAL(10,2) NOT NULL DEFAULT 0,
+  item VARCHAR(32) NOT NULL DEFAULT 'coins',
+  qty INT NOT NULL DEFAULT 0,
+  status VARCHAR(16) NOT NULL DEFAULT 'pending', -- pending / paid / failed
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  paid_at DATETIME NULL,
+  KEY idx_player (player_id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS announcements (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  title VARCHAR(128) NOT NULL,
+  content TEXT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS settings (
+  skey VARCHAR(64) NOT NULL PRIMARY KEY,
+  svalue VARCHAR(255) NOT NULL DEFAULT ''
+) ENGINE=InnoDB;

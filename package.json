@@ -1,0 +1,16 @@
+{
+  "name": "yishijie-server",
+  "version": "0.1.0",
+  "description": "异世界传说 - 服务端（注册/登录、存档同步、交易所、充值）",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node src/server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "mysql2": "^3.9.0"
+  }
+}
