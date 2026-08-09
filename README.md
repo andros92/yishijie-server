@@ -53,9 +53,26 @@ WantedBy=multi-user.target
 - `POST /admin/code/create` `GET /admin/code/list` `DELETE /admin/code/:code` 激活码管理
 - `GET /leaderboard?type=level|pet|tower` 排行榜
 - `GET /pvp/targets` `GET /pvp/defender` `POST /pvp/report` `GET /pvp/rating` PVP（AI 代守 + 积分）
+- `POST /rename` 玩家自主改名（每月一次、敏感词/重名校验）
 - `GET /announcements` 公告
 - `GET /version` 版本号
 - `GET /health` 健康检查
+
+## 管理后台（参照垃圾佬）
+
+- `GET /admin` 后台页面（Basic 认证，浏览器直接访问；账号密码在 .env 的 `ADMIN_USER` / `ADMIN_PASS`）
+- `GET /api/yishijie/admin/stats` 统计（用户/存档/挂单/订单/邮件/封禁数）
+- `GET /api/yishijie/admin/users?keyword=` 玩家列表（搜索、等级、金币、封禁状态）
+- `GET /api/yishijie/admin/player/:playerId` 玩家详情 + 存档
+- `DELETE /api/yishijie/admin/player/:playerId` 删除玩家及全部数据
+- `POST /api/yishijie/admin/rename` 管理员改名
+- `POST /api/yishijie/admin/ban` / `POST /api/yishijie/admin/unban` 封号 / 解封
+- `POST /api/yishijie/punish` 制裁（强制改名违规昵称 + 封号）
+- `GET/POST/DELETE /api/yishijie/admin/banned-fingerprints` 设备指纹黑名单（封设备）
+- `POST /api/yishijie/admin/announcement` / `GET /api/yishijie/admin/announcements` / `DELETE /api/yishijie/admin/announcement/:id` 公告管理
+- `POST /api/yishijie/admin/version` 版本推送（versionCode/versionName/downloadUrl/updateNotes，手机端检查更新）
+- `GET /api/yishijie/admin/saves` 存档列表
+- `GET /api/yishijie/admin/listings` 挂单列表
 
 ## 存档格式
 

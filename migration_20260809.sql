@@ -45,3 +45,11 @@ CREATE TABLE IF NOT EXISTS pvp_matches (
   KEY idx_attacker (attacker_id),
   KEY idx_defender (defender_id)
 ) ENGINE=InnoDB;
+
+ALTER TABLE users ADD COLUMN name_changed_at DATETIME NULL;
+
+CREATE TABLE IF NOT EXISTS banned_fingerprints (
+  fingerprint VARCHAR(128) NOT NULL PRIMARY KEY,
+  reason VARCHAR(255) NOT NULL DEFAULT '',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB;

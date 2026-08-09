@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>异世界传说 · 管理后台</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif; background:#F5F6FA; color:#1A1D26; min-height:100vh; }
+.header { background:#FFFFFF; border-bottom:1px solid #E2E6EF; padding:14px 24px; display:flex; align-items:center; justify-content:space-between; }
+.header h1 { font-size:18px; }
+.header .sub { font-size:12px; color:#6B7280; margin-top:2px; }
+.refresh { padding:6px 16px; background:#2563EB; border:none; color:#fff; border-radius:8px; cursor:pointer; font-size:13px; }
+.stats { display:flex; gap:12px; padding:16px 24px; flex-wrap:wrap; }
+.stat-card { flex:1; min-width:110px; padding:14px; background:#fff; border-radius:12px; border:1px solid #E2E6EF; text-align:center; }
+.stat-val { font-size:24px; color:#2563EB; font-weight:700; }
+.stat-label { font-size:11px; color:#6B7280; margin-top:4px; }
+.tabs { display:flex; gap:4px; padding:0 24px; flex-wrap:wrap; }
+.tab { padding:8px 16px; background:#fff; border:1px solid #E2E6EF; border-radius:8px 8px 0 0; color:#6B7280; cursor:pointer; font-size:13px; }
+.tab.active { color:#2563EB; font-weight:700; border-bottom:2px solid #2563EB; }
+.content { padding:16px 24px 32px; }
+.panel { background:#fff; border:1px solid #E2E6EF; border-radius:12px; padding:16px; margin-bottom:16px; display:none; }
+.panel.active { display:block; }
+.panel h3 { font-size:14px; margin-bottom:12px; }
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th { text-align:left; padding:8px 10px; color:#6B7280; border-bottom:1px solid #E2E6EF; font-size:12px; }
+td { padding:8px 10px; border-bottom:1px solid #F0F1F5; }
+.btn { padding:5px 12px; border-radius:8px; border:none; cursor:pointer; font-size:12px; margin:0 3px; }
+.btn-primary { background:#2563EB; color:#fff; }
+.btn-danger { background:#DC2626; color:#fff; }
+.btn-ghost { background:#F0F2F8; color:#1A1D26; }
+.btn-warn { background:#D97706; color:#fff; }
+.tag { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; }
+.tag-ban { background:#FEE2E2; color:#DC2626; }
+.tag-ok { background:#D1FAE5; color:#059669; }
+.form-row { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+.form-row input, .form-row textarea { padding:8px 10px; border:1px solid #E2E6EF; border-radius:8px; font-size:13px; flex:1; min-width:140px; }
+.form-row textarea { min-height:60px; }
+.msg { font-size:12px; color:#059669; margin-top:6px; }
+.err { font-size:12px; color:#DC2626; margin-top:6px; }
+.empty { text-align:center; color:#9CA3AF; padding:24px; font-size:13px; }
+.detail { white-space:pre-wrap; font-size:12px; background:#F9FAFB; border:1px solid #E2E6EF; border-radius:8px; padding:10px; max-height:300px; overflow:auto; }
+</style>
+</head>
+<body>
+<div class="header">
+  <div>
+    <h1>异世界传说 · 管理后台</h1>
+    <div class="sub">玩家 / 封禁 / 改名 / 版本推送 / 公告 / 兑换码 / 邮件 / 设备黑名单</div>
+  </div>
+  <button class="refresh" onclick="loadAll()">刷新数据</button>
+</div>
+<div class="stats" id="stats"></div>
+<div class="tabs" id="tabs"></div>
+<div class="content">
+  <div class="panel active" id="panel-overview"><h3>概览</h3><div class="msg">选择上方标签进入管理功能。所有写操作需要管理认证（页面本身已认证）。</div></div>
+  <div class="panel" id="panel-players">
+    <h3>玩家管理</h3>
+    <div class="form-row">
+      <input id="kw" placeholder="搜索玩家ID或昵称" onkeydown="if(event.key==='Enter')loadPlayers()">
+      <button class="btn btn-primary" onclick="loadPlayers()">搜索</button>
+    </div>
+    <table><thead><tr><th>ID</th><th>昵称</th><th>等级</th><th>金币</th><th>状态</th><th>操作</th></tr></thead><tbody id="tbody-players"></tbody></table>
+  </div>
+  <div class="panel" id="panel-version">
+    <h3>版本推送（手机端检查更新）</h3>
+    <div class="form-row"><input id="vCode" type="number" placeholder="versionCode（数字）"><input id="vName" placeholder="versionName 如 0.2.0"></div>
+    <div class="form-row"><input id="vUrl" placeholder="APK 下载链接"></div>
+    <div class="form-row"><textarea id="vNotes" placeholder="更新说明"></textarea></div>
+    <button class="btn btn-primary" onclick="saveVersion()">保存版本</button>
+    <div id="vMsg" class="msg"></div>
+  </div>
+  <div class="panel" id="panel-announcements">
+    <h3>公告管理</h3>
+    <div class="form-row"><input id="aTitle" placeholder="标题"><textarea id="aContent" placeholder="内容"></textarea></div>
+    <button class="btn btn-primary" onclick="createAnnouncement()">发布公告</button>
+    <table style="margin-top:12px"><thead><tr><th>ID</th><th>标题</th><th>时间</th><th>操作</th></tr></thead><tbody id="tbody-ann"></tbody></table>
+  </div>
+  <div class="panel" id="panel-codes">
+    <h3>激活码管理</h3>
+    <div class="form-row"><input id="cCode" placeholder="激活码（大写字母数字）"><input id="cMax" type="number" placeholder="最大使用次数"></div>
+    <div class="form-row"><textarea id="cRewards" placeholder='奖励JSON 如 {"coins":50000,"items":{"iron_ingot":10}}'></textarea></div>
+    <div class="form-row"><input id="cExp" placeholder="过期时间 如 2026-12-31 23:59:59（可留空）"><input id="cDesc" placeholder="描述"></div>
+    <button class="btn btn-primary" onclick="createCode()">创建激活码</button>
+    <table style="margin-top:12px"><thead><tr><th>激活码</th><th>已用/上限</th><th>过期</th><th>描述</th><th>操作</th></tr></thead><tbody id="tbody-codes"></tbody></table>
+  </div>
+  <div class="panel" id="panel-mail">
+    <h3>邮件发送（可发金币/物品/装备/宠物）</h3>
+    <div class="form-row"><input id="mPid" placeholder="玩家ID"><input id="mTitle" placeholder="标题"></div>
+    <div class="form-row"><textarea id="mContent" placeholder="内容"></textarea></div>
+    <div class="form-row"><textarea id="mRewards" placeholder='奖励JSON 如 {"coins":10000,"items":{"wood":50},"pets":[{"key":"wolf","name":"野狼","lv":1}]}'></textarea></div>
+    <button class="btn btn-primary" onclick="sendMail()">发送邮件</button>
+    <div id="mMsg" class="msg"></div>
+  </div>
+  <div class="panel" id="panel-banned">
+    <h3>设备指纹黑名单</h3>
+    <div class="form-row"><input id="bfFp" placeholder="设备指纹"><input id="bfReason" placeholder="原因"></div>
+    <button class="btn btn-primary" onclick="addBannedFp()">加入黑名单</button>
+    <table style="margin-top:12px"><thead><tr><th>指纹</th><th>原因</th><th>时间</th><th>操作</th></tr></thead><tbody id="tbody-banned"></tbody></table>
+  </div>
+  <div class="panel" id="panel-listings">
+    <h3>在售挂单</h3>
+    <table><thead><tr><th>ID</th><th>卖家</th><th>物品</th><th>数量</th><th>价格</th><th>状态</th></tr></thead><tbody id="tbody-listings"></tbody></table>
+  </div>
+  <div class="panel" id="panel-saves">
+    <h3>存档列表</h3>
+    <table><thead><tr><th>玩家</th><th>ID</th><th>最后更新</th></tr></thead><tbody id="tbody-saves"></tbody></table>
+  </div>
+</div>
+
+<script>
+var API = '/api/yishijie';
+var auth = sessionStorage.getItem('ysj_admin_auth') || '';
+if (!auth) {
+  var u = prompt('管理员账号：');
+  var p = prompt('管理员密码：');
+  auth = btoa(u + ':' + p);
+  sessionStorage.setItem('ysj_admin_auth', auth);
+}
+function hdrs() { return { 'Content-Type': 'application/json', 'Authorization': 'Basic ' + auth }; }
+async function jget(url) {
+  var r = await fetch(url, { headers: hdrs() });
+  if (r.status === 401) { sessionStorage.removeItem('ysj_admin_auth'); alert('认证失败，请刷新页面重新输入'); return { success:false, data:[] }; }
+  return r.json();
+}
+async function jpost(url, body) {
+  var r = await fetch(url, { method:'POST', headers: hdrs(), body: JSON.stringify(body || {}) });
+  if (r.status === 401) { sessionStorage.removeItem('ysj_admin_auth'); alert('认证失败，请刷新页面重新输入'); return { success:false }; }
+  return r.json();
+}
+async function jdel(url) {
+  var r = await fetch(url, { method:'DELETE', headers: hdrs() });
+  if (r.status === 401) { sessionStorage.removeItem('ysj_admin_auth'); alert('认证失败，请刷新页面重新输入'); return { success:false }; }
+  return r.json();
+}
+
+var TABS = [
+  ['overview','概览'], ['players','玩家'], ['version','版本'], ['announcements','公告'],
+  ['codes','兑换码'], ['mail','邮件'], ['banned','黑名单'], ['listings','挂单'], ['saves','存档']
+];
+var current = 'overview';
+function renderTabs() {
+  document.getElementById('tabs').innerHTML = TABS.map(function(t){
+    return '<div class="tab' + (t[0]===current?' active':'') + '" onclick="switchTab(\'' + t[0] + '\')">' + t[1] + '</div>';
+  }).join('');
+}
+function switchTab(name) {
+  current = name;
+  renderTabs();
+  document.querySelectorAll('.panel').forEach(function(p){ p.classList.remove('active'); });
+  document.getElementById('panel-' + name).classList.add('active');
+  if (name === 'players') loadPlayers();
+  if (name === 'version') loadVersion();
+  if (name === 'announcements') loadAnnouncements();
+  if (name === 'codes') loadCodes();
+  if (name === 'banned') loadBanned();
+  if (name === 'listings') loadListings();
+  if (name === 'saves') loadSaves();
+}
+
+async function loadAll() {
+  var d = await jget(API + '/admin/stats');
+  var s = d.data || {};
+  document.getElementById('stats').innerHTML = [
+    ['用户', s.users||0], ['存档', s.saves||0], ['在售挂单', s.listings||0],
+    ['已支付订单', s.paidOrders||0], ['邮件', s.mails||0], ['封禁账号', s.bannedUsers||0]
+  ].map(function(x){ return '<div class="stat-card"><div class="stat-val">' + x[1] + '</div><div class="stat-label">' + x[0] + '</div></div>'; }).join('');
+}
+
+// 玩家
+async function loadPlayers() {
+  var kw = document.getElementById('kw').value.trim();
+  var d = await jget(API + '/admin/users' + (kw ? '?keyword=' + encodeURIComponent(kw) : ''));
+  var rows = d.data || [];
+  document.getElementById('tbody-players').innerHTML = rows.map(function(p){
+    return '<tr><td>' + p.playerId + '</td><td>' + p.playerName + '</td><td>Lv.' + p.lv + '</td><td>' + p.gold + '</td>' +
+      '<td>' + (p.banned ? '<span class="tag tag-ban">已封禁</span>' : '<span class="tag tag-ok">正常</span>') + '</td>' +
+      '<td><button class="btn btn-ghost" onclick="viewPlayer(\'' + p.playerId + '\')">存档</button>' +
+      '<button class="btn btn-primary" onclick="renamePlayer(\'' + p.playerId + '\')">改名</button>' +
+      (p.banned ? '<button class="btn btn-ghost" onclick="unbanPlayer(\'' + p.playerId + '\')">解封</button>'
+                : '<button class="btn btn-warn" onclick="banPlayer(\'' + p.playerId + '\')">封号</button>') +
+      '<button class="btn btn-danger" onclick="punishPlayer(\'' + p.playerId + '\')">制裁</button>' +
+      '<button class="btn btn-danger" onclick="delPlayer(\'' + p.playerId + '\')">删除</button></td></tr>';
+  }).join('') || '<tr><td colspan="6" class="empty">暂无玩家</td></tr>';
+}
+async function viewPlayer(pid) {
+  var d = await jget(API + '/admin/player/' + pid);
+  if (!d.success) { alert(d.error || '获取失败'); return; }
+  alert('玩家 ' + pid + ' 存档：\n\n' + JSON.stringify(d.data.save || {}, null, 2).substring(0, 3000));
+}
+async function renamePlayer(pid) {
+  var name = prompt('输入新昵称（2-12字）：');
+  if (!name) return;
+  var d = await jpost(API + '/admin/rename', { playerId: pid, newName: name });
+  alert(d.message || d.error || '完成');
+  loadPlayers();
+}
+async function banPlayer(pid) {
+  var reason = prompt('封号原因：') || '违规行为';
+  var d = await jpost(API + '/admin/ban', { playerId: pid, reason: reason });
+  alert(d.message || d.error || '完成');
+  loadPlayers();
+}
+async function unbanPlayer(pid) {
+  var d = await jpost(API + '/admin/unban', { playerId: pid });
+  alert(d.message || d.error || '完成');
+  loadPlayers();
+}
+async function punishPlayer(pid) {
+  if (!confirm('确认制裁该玩家（强制改名+封号）？')) return;
+  var d = await jpost(API + '/punish', { playerId: pid, reason: '违规昵称' });
+  alert(d.message || d.error || '完成');
+  loadPlayers();
+}
+async function delPlayer(pid) {
+  if (!confirm('确认删除玩家 ' + pid + ' 及其全部数据？不可恢复！')) return;
+  var d = await jdel(API + '/admin/player/' + pid);
+  alert(d.message || d.error || '完成');
+  loadPlayers();
+}
+
+// 版本
+async function loadVersion() {
+  var d = await jget(API + '/version');
+  document.getElementById('vCode').value = d.versionCode || 1;
+  document.getElementById('vName').value = d.versionName || '';
+  document.getElementById('vUrl').value = d.downloadUrl || '';
+  document.getElementById('vNotes').value = d.updateNotes || '';
+}
+async function saveVersion() {
+  var d = await jpost(API + '/admin/version', {
+    versionCode: document.getElementById('vCode').value,
+    versionName: document.getElementById('vName').value,
+    downloadUrl: document.getElementById('vUrl').value,
+    updateNotes: document.getElementById('vNotes').value
+  });
+  document.getElementById('vMsg').textContent = d.message || d.error || '';
+}
+
+// 公告
+async function loadAnnouncements() {
+  var d = await jget(API + '/admin/announcements');
+  document.getElementById('tbody-ann').innerHTML = (d.data || []).map(function(a){
+    return '<tr><td>' + a.id + '</td><td>' + a.title + '</td><td>' + a.created_at + '</td>' +
+      '<td><button class="btn btn-danger" onclick="delAnn(' + a.id + ')">删除</button></td></tr>';
+  }).join('') || '<tr><td colspan="4" class="empty">暂无公告</td></tr>';
+}
+async function createAnnouncement() {
+  var t = document.getElementById('aTitle').value.trim();
+  var c = document.getElementById('aContent').value.trim();
+  if (!t || !c) { alert('请填写标题和内容'); return; }
+  var d = await jpost(API + '/admin/announcement', { title: t, content: c });
+  alert(d.success ? '已发布' : (d.error || '失败'));
+  document.getElementById('aTitle').value = '';
+  document.getElementById('aContent').value = '';
+  loadAnnouncements();
+}
+async function delAnn(id) {
+  await jdel(API + '/admin/announcement/' + id);
+  loadAnnouncements();
+}
+
+// 兑换码
+async function loadCodes() {
+  var d = await jget(API + '/admin/code/list');
+  document.getElementById('tbody-codes').innerHTML = (d.codes || []).map(function(c){
+    return '<tr><td>' + c.code + '</td><td>' + c.used_count + '/' + c.max_uses + '</td><td>' + (c.expires_at || '-') + '</td><td>' + c.description + '</td>' +
+      '<td><button class="btn btn-danger" onclick="delCode(\'' + c.code + '\')">删除</button></td></tr>';
+  }).join('') || '<tr><td colspan="5" class="empty">暂无激活码</td></tr>';
+}
+async function createCode() {
+  var code = document.getElementById('cCode').value.trim();
+  var rewards = document.getElementById('cRewards').value.trim();
+  if (!code || !rewards) { alert('请填写激活码和奖励JSON'); return; }
+  var rewardsObj;
+  try { rewardsObj = JSON.parse(rewards); } catch(e) { alert('奖励JSON格式错误'); return; }
+  var d = await jpost(API + '/admin/code/create', {
+    code: code, rewards: rewardsObj,
+    maxUses: document.getElementById('cMax').value || 1,
+    expiresAt: document.getElementById('cExp').value || null,
+    description: document.getElementById('cDesc').value.trim()
+  });
+  alert(d.message || d.error || '完成');
+  loadCodes();
+}
+async function delCode(code) {
+  await jdel(API + '/admin/code/' + encodeURIComponent(code));
+  loadCodes();
+}
+
+// 邮件
+async function sendMail() {
+  var pid = document.getElementById('mPid').value.trim();
+  var title = document.getElementById('mTitle').value.trim();
+  var content = document.getElementById('mContent').value.trim();
+  if (!pid || !title) { alert('请填写玩家ID和标题'); return; }
+  var rewardsRaw = document.getElementById('mRewards').value.trim();
+  var rewards = null;
+  if (rewardsRaw) { try { rewards = JSON.parse(rewardsRaw); } catch(e) { alert('奖励JSON格式错误'); return; } }
+  var d = await jpost(API + '/admin/mail/send', { playerId: pid, title: title, content: content, rewards: rewards });
+  document.getElementById('mMsg').textContent = d.success ? '已发送' : (d.error || '失败');
+}
+
+// 黑名单
+async function loadBanned() {
+  var d = await jget(API + '/admin/banned-fingerprints');
+  document.getElementById('tbody-banned').innerHTML = (d.data || []).map(function(b){
+    return '<tr><td>' + b.fingerprint + '</td><td>' + b.reason + '</td><td>' + b.created_at + '</td>' +
+      '<td><button class="btn btn-danger" onclick="delBanned(\'' + encodeURIComponent(b.fingerprint) + '\')">移除</button></td></tr>';
+  }).join('') || '<tr><td colspan="4" class="empty">黑名单为空</td></tr>';
+}
+async function addBannedFp() {
+  var fp = document.getElementById('bfFp').value.trim();
+  if (!fp) { alert('请填写设备指纹'); return; }
+  var d = await jpost(API + '/admin/banned-fingerprints', { fingerprint: fp, reason: document.getElementById('bfReason').value.trim() });
+  alert(d.message || d.error || '完成');
+  document.getElementById('bfFp').value = '';
+  loadBanned();
+}
+async function delBanned(fp) {
+  await jdel(API + '/admin/banned-fingerprints/' + fp);
+  loadBanned();
+}
+
+// 挂单 / 存档
+async function loadListings() {
+  var d = await jget(API + '/admin/listings');
+  document.getElementById('tbody-listings').innerHTML = (d.data || []).map(function(l){
+    return '<tr><td>' + l.id + '</td><td>' + l.seller_name + '</td><td>' + l.item_name + '</td><td>' + l.qty + '</td><td>' + l.price + '</td><td>' + l.status + '</td></tr>';
+  }).join('') || '<tr><td colspan="6" class="empty">暂无挂单</td></tr>';
+}
+async function loadSaves() {
+  var d = await jget(API + '/admin/saves');
+  document.getElementById('tbody-saves').innerHTML = (d.data || []).map(function(s){
+    return '<tr><td>' + s.player_name + '</td><td>' + s.player_id + '</td><td>' + s.updated_at + '</td></tr>';
+  }).join('') || '<tr><td colspan="3" class="empty">暂无存档</td></tr>';
+}
+
+renderTabs();
+loadAll();
+</script>
+</body>
+</html>

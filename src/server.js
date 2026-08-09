@@ -23,9 +23,15 @@ const SECRET = process.env.YS_SECRET || 'change-this-secret'
 const COIN_PER_YUAN = Number(process.env.RECHARGE_COIN_PER_YUAN || 10000)
 const EXCHANGE_FEE_RATE = 0.10 // 平台手续费 10%
 const MAX_BODY = 2 * 1024 * 1024
+// 管理后台 Basic 认证（与垃圾佬后台一致，/admin 页面 + admin 接口共用）
+const ADMIN_USER = process.env.ADMIN_USER || 'shatangju'
+const ADMIN_PASS = process.env.ADMIN_PASS || 'change-this-admin-pass'
 // ============ 爱发电（与垃圾佬/对决战2 同一套配置） ============
 const AFDIAN_URL = process.env.AFDIAN_URL || 'https://www.ifdian.net/item/6684be3293a211f1853d52540025c377'
 const AFDIAN_WEBHOOK_TOKEN = process.env.AFDIAN_WEBHOOK_TOKEN || 'pw3N5qWDUV9syFxhSJKufCeAdabrX7Bm'
+
+// 敏感词（参照垃圾佬，用于改名过滤）
+const SENSITIVE_WORDS = ['admin', '管理员', '客服', '垃圾', '傻逼', 'sb', 'cnm', 'nmsl', 'fuck', 'shit', '妓', '赌', '毒品', '代练', '外挂', '脚本', '挂机']
 
 const pool = mysql.createPool({
   host: process.env.DB_HOST || '127.0.0.1',
@@ -78,6 +84,39 @@ function sign(str) {
   return crypto.createHmac('sha256', SECRET).update(String(str)).digest('hex')
 }
 
+function sanitizeNickname(name) {
+  return String(name || '').replace(/[<>&"'\\/]/g, '').trim().slice(0, 12)
+}
+
+function checkAdminAuth(req) {
+  const h = req.header('authorization') || ''
+  if (h.startsWith('Basic ')) {
+    try {
+      const decoded = Buffer.from(h.slice(6), 'base64').toString()
+      const [u, p] = decoded.split(':')
+      return u === ADMIN_USER && p === ADMIN_PASS
+    } catch (e) {
+      return false
+    }
+  }
+  // 兼容 ?secret= 形式（旧管理接口）
+  return req.query && req.query.secret === SECRET
+}
+
+function requireAdmin(req, res) {
+  if (!checkAdminAuth(req)) {
+    res.set('WWW-Authenticate', 'Basic realm="Admin"')
+    return json(res, 401, { error: '需要管理认证' })
+  }
+  return true
+}
+
+async function checkBannedFingerprint(fp) {
+  if (!fp) return false
+  const [rows] = await pool.query('SELECT * FROM banned_fingerprints WHERE fingerprint = ? LIMIT 1', [fp])
+  return rows.length ? rows[0] : null
+}
+
 // 爱发电 webhook 验签（与对决战2 economyService.verifyWebhookSignature 一致）
 function verifyAfdianSignature(rawBody, signature) {
   if (!signature || !AFDIAN_WEBHOOK_TOKEN) return false
@@ -103,7 +142,7 @@ async function findUserByFp(deviceFp, phoneFp) {
 
 async function authUser(playerId, deviceFp, apiKey) {
   if (!playerId || !deviceFp || !apiKey) return null
-  const [rows] = await pool.query('SELECT * FROM users WHERE player_id = ? AND device_fingerprint = ? AND api_key = ? LIMIT 1', [playerId, deviceFp, apiKey])
+  const [rows] = await pool.query('SELECT * FROM users WHERE player_id = ? AND device_fingerprint = ? AND api_key = ? AND banned = 0 LIMIT 1', [playerId, deviceFp, apiKey])
   return rows.length ? rows[0] : null
 }
 
@@ -264,6 +303,9 @@ app.post('/api/yishijie/register', async (req, res) => {
       return json(res, 400, { error: '设备识别失败，无法注册。请确保手环和手机已正常连接。' })
     }
     if (fp.length < 16 && validFingerprint(phoneFingerprint)) fp = 'phone_' + phoneFingerprint.slice(0, 32)
+    // 设备黑名单：被封禁的设备不允许注册/登录
+    const bfp = await checkBannedFingerprint(fp)
+    if (bfp) return json(res, 403, { error: '该设备已被封禁：' + (bfp.reason || '违规行为') + '。如有疑问请联系管理员。' })
     const existing = await findUserByFp(fp, phoneFingerprint || '')
     if (existing) {
       if (existing.banned) return json(res, 403, { error: '该账号已被封禁：' + (existing.ban_reason || '违规行为') })
@@ -816,7 +858,7 @@ app.get('/api/yishijie/leaderboard', async (req, res) => {
     const type = req.query.type || 'level'
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || '50', 10)))
     const [rows] = await pool.query(
-      'SELECT s.player_id, s.data, u.player_name FROM saves s JOIN users u ON u.player_id = s.player_id'
+      'SELECT s.player_id, s.data, u.player_name FROM saves s JOIN users u ON u.player_id = s.player_id WHERE u.banned = 0'
     )
     const list = []
     for (const r of rows) {
@@ -853,7 +895,7 @@ app.get('/api/yishijie/pvp/targets', async (req, res) => {
     const user = await authUser(playerId, deviceFingerprint, apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
     const [rows] = await pool.query(
-      'SELECT s.player_id, s.data, u.player_name, r.rating, r.wins, r.losses FROM saves s JOIN users u ON u.player_id = s.player_id LEFT JOIN pvp_ratings r ON r.player_id = s.player_id WHERE s.player_id <> ?',
+      'SELECT s.player_id, s.data, u.player_name, r.rating, r.wins, r.losses FROM saves s JOIN users u ON u.player_id = s.player_id LEFT JOIN pvp_ratings r ON r.player_id = s.player_id WHERE s.player_id <> ? AND u.banned = 0',
       [user.player_id]
     )
     const list = []
@@ -951,8 +993,36 @@ app.get('/api/yishijie/pvp/rating', async (req, res) => {
 
 app.get('/api/yishijie/version', async (req, res) => {
   try {
-    const [rows] = await pool.query("SELECT svalue FROM settings WHERE skey = 'version' LIMIT 1")
-    return json(res, 200, { success: true, version: rows.length ? rows[0].svalue : '0.1.0' })
+    const [rows] = await pool.query("SELECT svalue FROM settings WHERE skey = 'app_version' LIMIT 1")
+    const ver = rows.length ? parseJsonSafe(rows[0].svalue, null) : null
+    return json(res, 200, {
+      success: true,
+      versionCode: ver ? Number(ver.versionCode) || 1 : 1,
+      versionName: (ver && ver.versionName) || '0.1.0',
+      downloadUrl: (ver && ver.downloadUrl) || '',
+      updateNotes: (ver && ver.updateNotes) || ''
+    })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+// 管理端保存版本信息（手机端据此检查更新并下载新版本）
+app.post('/api/yishijie/admin/version', async (req, res) => {
+  try {
+    if (!requireAdmin(req, res)) return
+    const { versionCode, versionName, downloadUrl, updateNotes } = req.body || {}
+    const ver = {
+      versionCode: parseInt(versionCode, 10) || 1,
+      versionName: String(versionName || '0.1.0'),
+      downloadUrl: String(downloadUrl || ''),
+      updateNotes: String(updateNotes || '')
+    }
+    await pool.query(
+      "INSERT INTO settings (skey, svalue) VALUES ('app_version', ?) ON DUPLICATE KEY UPDATE svalue = VALUES(svalue)",
+      [JSON.stringify(ver)]
+    )
+    return json(res, 200, { success: true, message: '版本信息已保存' })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
   }
@@ -960,11 +1030,97 @@ app.get('/api/yishijie/version', async (req, res) => {
 
 app.get('/health', (req, res) => json(res, 200, { ok: true }))
 
-// ============ 管理（基础） ============
+// 管理后台页面（参照垃圾佬 /admin WebView 入口）
+app.get('/admin', (req, res) => {
+  if (!requireAdmin(req, res)) return
+  res.sendFile(path.join(path.dirname(fileURLToPath(import.meta.url)), 'admin.html'))
+})
+
+// ============ 管理（完整后台，参照垃圾佬：玩家/改名/封禁/黑名单/公告/版本/存档） ============
+app.get('/api/yishijie/admin/stats', async (req, res) => {
+  try {
+    if (!requireAdmin(req, res)) return
+    const [[{ users }]] = await pool.query('SELECT COUNT(*) AS users FROM users')
+    const [[{ saves }]] = await pool.query('SELECT COUNT(*) AS saves FROM saves')
+    const [[{ listings }]] = await pool.query('SELECT COUNT(*) AS listings FROM exchange_listings WHERE status = "on"')
+    const [[{ paidOrders }]] = await pool.query('SELECT COUNT(*) AS paidOrders FROM recharge_orders WHERE status = "paid"')
+    const [[{ mails }]] = await pool.query('SELECT COUNT(*) AS mails FROM mail')
+    const [[{ bannedUsers }]] = await pool.query('SELECT COUNT(*) AS bannedUsers FROM users WHERE banned = 1')
+    return json(res, 200, { success: true, data: { users, saves, listings, paidOrders, mails, bannedUsers } })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
 app.get('/api/yishijie/admin/users', async (req, res) => {
   try {
-    if (req.query.secret !== SECRET) return json(res, 403, { error: '管理密钥错误' })
-    const [rows] = await pool.query('SELECT player_id, player_name, created_at, banned FROM users ORDER BY id DESC LIMIT 200')
+    if (!requireAdmin(req, res)) return
+    const keyword = String(req.query.keyword || '').toLowerCase()
+    let sql = 'SELECT u.player_id, u.player_name, u.created_at, u.banned, u.ban_reason, u.name_changed, s.data FROM users u LEFT JOIN saves s ON s.player_id = u.player_id'
+    const params = []
+    if (keyword) {
+      sql += ' WHERE u.player_id LIKE ? OR u.player_name LIKE ?'
+      params.push('%' + keyword + '%', '%' + keyword + '%')
+    }
+    sql += ' ORDER BY u.id DESC LIMIT 200'
+    const [rows] = await pool.query(sql, params)
+    const data = rows.map(r => {
+      const save = parseJsonSafe(r.data, null)
+      const st = save && save.stats ? parseJsonSafe(save.stats, null) : null
+      return {
+        playerId: r.player_id,
+        playerName: r.player_name,
+        createdAt: r.created_at,
+        banned: !!r.banned,
+        banReason: r.ban_reason || '',
+        nameChanged: !!r.name_changed,
+        lv: st ? (Number(st.lv) || 1) : 1,
+        gold: (save && save.bag && save.bag.coin) || 0
+      }
+    })
+    return json(res, 200, { success: true, data })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+app.get('/api/yishijie/admin/player/:playerId', async (req, res) => {
+  try {
+    if (!requireAdmin(req, res)) return
+    const [rows] = await pool.query('SELECT * FROM users WHERE player_id = ? LIMIT 1', [req.params.playerId])
+    if (!rows.length) return json(res, 404, { error: '玩家不存在' })
+    const save = await readSave(req.params.playerId)
+    return json(res, 200, { success: true, data: { user: rows[0], save } })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+app.delete('/api/yishijie/admin/player/:playerId', async (req, res) => {
+  try {
+    if (!requireAdmin(req, res)) return
+    const pid = req.params.playerId
+    const [rows] = await pool.query('SELECT player_id FROM users WHERE player_id = ? LIMIT 1', [pid])
+    if (!rows.length) return json(res, 404, { error: '玩家不存在' })
+    await pool.query('DELETE FROM users WHERE player_id = ?', [pid])
+    await pool.query('DELETE FROM saves WHERE player_id = ?', [pid])
+    await pool.query('DELETE FROM exchange_listings WHERE seller_id = ?', [pid])
+    await pool.query('DELETE FROM exchange_trade_history WHERE seller_id = ? OR buyer_id = ?', [pid, pid])
+    await pool.query('DELETE FROM recharge_orders WHERE player_id = ?', [pid])
+    await pool.query('DELETE FROM mail WHERE player_id = ?', [pid])
+    await pool.query('DELETE FROM redeem_uses WHERE player_id = ?', [pid])
+    await pool.query('DELETE FROM pvp_ratings WHERE player_id = ?', [pid])
+    await pool.query('DELETE FROM pvp_matches WHERE attacker_id = ? OR defender_id = ?', [pid, pid])
+    return json(res, 200, { success: true, message: '已删除玩家及其全部数据' })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+app.get('/api/yishijie/admin/saves', async (req, res) => {
+  try {
+    if (!requireAdmin(req, res)) return
+    const [rows] = await pool.query('SELECT s.player_id, u.player_name, s.updated_at FROM saves s JOIN users u ON u.player_id = s.player_id ORDER BY s.updated_at DESC LIMIT 200')
     return json(res, 200, { success: true, data: rows })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
@@ -973,9 +1129,174 @@ app.get('/api/yishijie/admin/users', async (req, res) => {
 
 app.get('/api/yishijie/admin/listings', async (req, res) => {
   try {
-    if (req.query.secret !== SECRET) return json(res, 403, { error: '管理密钥错误' })
+    if (!requireAdmin(req, res)) return
     const [rows] = await pool.query('SELECT * FROM exchange_listings ORDER BY id DESC LIMIT 200')
     return json(res, 200, { success: true, data: rows })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+// 管理员改名（参照垃圾佬：封号/改名/制裁统一走这里）
+app.post('/api/yishijie/admin/rename', async (req, res) => {
+  try {
+    if (!requireAdmin(req, res)) return
+    const { playerId, newName } = req.body || {}
+    const name = sanitizeNickname(newName)
+    if (!playerId || !name || name.length < 2) return json(res, 400, { error: '名称需 2-12 个字符' })
+    const [rows] = await pool.query('SELECT * FROM users WHERE player_id = ? LIMIT 1', [playerId])
+    if (!rows.length) return json(res, 404, { error: '玩家不存在' })
+    await pool.query('UPDATE users SET player_name = ?, name_changed = 1, name_changed_at = NOW() WHERE player_id = ?', [name, playerId])
+    return json(res, 200, { success: true, message: '已改名：' + name })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+// 封号（参照垃圾佬：移出排行榜/PVP）
+app.post('/api/yishijie/admin/ban', async (req, res) => {
+  try {
+    if (!requireAdmin(req, res)) return
+    const { playerId, reason } = req.body || {}
+    if (!playerId) return json(res, 400, { error: '缺少玩家ID' })
+    const [rows] = await pool.query('SELECT * FROM users WHERE player_id = ? LIMIT 1', [playerId])
+    if (!rows.length) return json(res, 404, { error: '玩家不存在' })
+    if (rows[0].banned) return json(res, 400, { error: '该玩家已被封号' })
+    await pool.query('UPDATE users SET banned = 1, ban_reason = ? WHERE player_id = ?', [String(reason || '违规行为').slice(0, 255), playerId])
+    await pool.query('DELETE FROM pvp_ratings WHERE player_id = ?', [playerId])
+    return json(res, 200, { success: true, message: '已封号' })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+app.post('/api/yishijie/admin/unban', async (req, res) => {
+  try {
+    if (!requireAdmin(req, res)) return
+    const { playerId } = req.body || {}
+    if (!playerId) return json(res, 400, { error: '缺少玩家ID' })
+    const [rows] = await pool.query('SELECT * FROM users WHERE player_id = ? LIMIT 1', [playerId])
+    if (!rows.length) return json(res, 404, { error: '玩家不存在' })
+    if (!rows[0].banned) return json(res, 400, { error: '该玩家未被封号' })
+    await pool.query('UPDATE users SET banned = 0, ban_reason = "" WHERE player_id = ?', [playerId])
+    return json(res, 200, { success: true, message: '已解封' })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+// 制裁：改名（违规昵称+随机后缀）+ 封号
+app.post('/api/yishijie/punish', async (req, res) => {
+  try {
+    if (!requireAdmin(req, res)) return
+    const { playerId, reason } = req.body || {}
+    if (!playerId) return json(res, 400, { error: '缺少玩家ID' })
+    const [rows] = await pool.query('SELECT * FROM users WHERE player_id = ? LIMIT 1', [playerId])
+    if (!rows.length) return json(res, 404, { error: '玩家不存在' })
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+    let suffix = ''
+    for (let i = 0; i < 6; i++) suffix += chars.charAt(Math.floor(Math.random() * chars.length))
+    const newName = '违规昵称' + suffix
+    await pool.query('UPDATE users SET player_name = ?, name_changed = 1, name_changed_at = NOW(), banned = 1, ban_reason = ? WHERE player_id = ?',
+      [newName, String(reason || '违规行为').slice(0, 255), playerId])
+    await pool.query('DELETE FROM pvp_ratings WHERE player_id = ?', [playerId])
+    return json(res, 200, { success: true, newName, banned: true, message: '已制裁并封号' })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+// 设备指纹黑名单（封设备）
+app.get('/api/yishijie/admin/banned-fingerprints', async (req, res) => {
+  try {
+    if (!requireAdmin(req, res)) return
+    const [rows] = await pool.query('SELECT * FROM banned_fingerprints ORDER BY created_at DESC')
+    return json(res, 200, { success: true, data: rows })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+app.post('/api/yishijie/admin/banned-fingerprints', async (req, res) => {
+  try {
+    if (!requireAdmin(req, res)) return
+    const { fingerprint, reason } = req.body || {}
+    if (!fingerprint) return json(res, 400, { error: '缺少设备指纹' })
+    await pool.query('INSERT INTO banned_fingerprints (fingerprint, reason) VALUES (?, ?) ON DUPLICATE KEY UPDATE reason = VALUES(reason)',
+      [String(fingerprint), String(reason || '违规行为').slice(0, 255)])
+    return json(res, 200, { success: true, message: '设备指纹已加入黑名单' })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+app.delete('/api/yishijie/admin/banned-fingerprints/:fingerprint', async (req, res) => {
+  try {
+    if (!requireAdmin(req, res)) return
+    const fp = decodeURIComponent(req.params.fingerprint)
+    await pool.query('DELETE FROM banned_fingerprints WHERE fingerprint = ?', [fp])
+    return json(res, 200, { success: true, message: '已移出黑名单' })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+// 公告管理（增删查；GET /announcements 为玩家接口）
+app.post('/api/yishijie/admin/announcement', async (req, res) => {
+  try {
+    if (!requireAdmin(req, res)) return
+    const { title, content } = req.body || {}
+    if (!title || !content) return json(res, 400, { error: '缺少标题或内容' })
+    const [r] = await pool.query('INSERT INTO announcements (title, content) VALUES (?, ?)', [String(title).slice(0, 128), String(content)])
+    return json(res, 200, { success: true, id: r.insertId })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+app.get('/api/yishijie/admin/announcements', async (req, res) => {
+  try {
+    if (!requireAdmin(req, res)) return
+    const [rows] = await pool.query('SELECT * FROM announcements ORDER BY id DESC LIMIT 200')
+    return json(res, 200, { success: true, data: rows })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+app.delete('/api/yishijie/admin/announcement/:id', async (req, res) => {
+  try {
+    if (!requireAdmin(req, res)) return
+    await pool.query('DELETE FROM announcements WHERE id = ?', [parseInt(req.params.id, 10) || 0])
+    return json(res, 200, { success: true })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+// 玩家自主改名（参照垃圾佬：设备校验 + 每月一次 + 敏感词/重名过滤）
+app.post('/api/yishijie/rename', async (req, res) => {
+  try {
+    const { playerId, deviceFingerprint, apiKey, newName } = req.body || {}
+    const user = await authUser(playerId, deviceFingerprint, apiKey)
+    if (!user) return json(res, 403, { error: '鉴权失败' })
+    const name = sanitizeNickname(newName)
+    if (name.length < 2) return json(res, 400, { error: '名字长度需要 2-12 个字符' })
+    if (user.name_changed_at) {
+      const last = new Date(user.name_changed_at)
+      const now = new Date()
+      if (last.getFullYear() === now.getFullYear() && last.getMonth() === now.getMonth()) {
+        return json(res, 403, { error: '本月已修改过名字，请下个月再试' })
+      }
+    }
+    const lower = name.toLowerCase()
+    for (const w of SENSITIVE_WORDS) {
+      if (lower.includes(w.toLowerCase())) return json(res, 400, { error: '名字包含违禁词，请重新输入' })
+    }
+    const [dup] = await pool.query('SELECT player_id FROM users WHERE player_name = ? AND player_id <> ? LIMIT 1', [name, user.player_id])
+    if (dup.length) return json(res, 409, { error: '该名字已被使用' })
+    await pool.query('UPDATE users SET player_name = ?, name_changed = 1, name_changed_at = NOW() WHERE player_id = ?', [name, user.player_id])
+    return json(res, 200, { success: true, playerName: name, message: '改名成功' })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
   }
