@@ -607,7 +607,9 @@ app.post('/api/yishijie/exchange/buy', async (req, res) => {
     if (!pre.length) return json(res, 404, { error: '该挂单不存在或已售出' })
     if (pre[0].seller_id === buyer.player_id) return json(res, 400, { error: '不能购买自己挂的单' })
     // 买家/卖家存档读写都串行化，防止并发购买/挂单/撤单互相覆盖
-    return withPlayerLock(buyer.player_id, () => withPlayerLock(pre[0].seller_id, async () => {
+    // 锁按玩家 ID 排序获取，避免 A买B 与 B买A 同时发生时 AB-BA 死锁
+    const lockIds = [buyer.player_id, pre[0].seller_id].sort()
+    return withPlayerLock(lockIds[0], () => withPlayerLock(lockIds[1], async () => {
       const conn = await pool.getConnection()
       try {
         await conn.beginTransaction()
