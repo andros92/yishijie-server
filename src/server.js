@@ -234,33 +234,43 @@ app.post('/api/yishijie/saves/:playerId', async (req, res) => {
 // ============ 交易所 ============
 app.post('/api/yishijie/exchange/list', async (req, res) => {
   try {
-    const { playerId, deviceFingerprint, apiKey, key, name, img, qty, price, quality, affixes, gem, dur, maxDur, broken } = req.body || {}
+    const { playerId, deviceFingerprint, apiKey, key, name, img, qty, price, quality, dur, maxDur } = req.body || {}
     const user = await authUser(playerId, deviceFingerprint, apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
     if (!key || !(qty > 0) || !(price > 0)) return json(res, 400, { error: '参数不完整' })
     const save = await readSave(user.player_id)
     if (!save) return json(res, 400, { error: '没有存档' })
+    const isGear = !!(quality || dur || maxDur)
     const listing = {
       item_key: key,
       item_name: name || key,
       item_img: img || '',
-      qty: qty,
+      qty: isGear ? 1 : qty,
       price: price,
-      quality: quality || '',
-      affix_json: affixes && affixes.length ? JSON.stringify(affixes) : null,
-      gem: gem || '',
-      dur: dur || 0,
-      max_dur: maxDur || 0,
-      broken: broken ? 1 : 0
+      quality: '', affix_json: null, gem: '', dur: 0, max_dur: 0, broken: 0
     }
-    // 先扣物品，扣不掉就不允许挂单
-    if (!deductItem(save, listing, qty)) {
-      return json(res, 400, { error: '背包里没有这件物品' })
+    if (isGear) {
+      // 装备：取该 key 的第一件实例做快照，保证品质/宝石/耐久/词条完整，再从存档移除
+      const list = (save.gear && save.gear[key]) || []
+      const inst = list[0]
+      if (!inst) return json(res, 400, { error: '背包里没有这件装备' })
+      list.splice(0, 1)
+      if (!list.length && save.gear) delete save.gear[key]
+      listing.quality = inst.quality || ''
+      listing.affix_json = inst.affixes && inst.affixes.length ? JSON.stringify(inst.affixes) : null
+      listing.gem = inst.gem || ''
+      listing.dur = inst.dur || 0
+      listing.max_dur = inst.maxDur || 0
+      listing.broken = inst.broken ? 1 : 0
+    } else {
+      const cur = (save.bag && save.bag[key]) || 0
+      if (cur < qty) return json(res, 400, { error: '背包里没有这件物品' })
+      save.bag[key] = cur - qty
     }
     await writeSave(user.player_id, save)
     const [r] = await pool.query(
       'INSERT INTO exchange_listings (seller_id, seller_name, item_key, item_name, item_img, qty, price, quality, affix_json, gem, dur, max_dur, broken) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [user.player_id, user.player_name, listing.item_key, listing.item_name, listing.item_img, qty, price, quality || '', listing.affix_json, gem || '', dur || 0, maxDur || 0, broken ? 1 : 0]
+      [user.player_id, user.player_name, listing.item_key, listing.item_name, listing.item_img, listing.qty, price, listing.quality, listing.affix_json, listing.gem, listing.dur, listing.max_dur, listing.broken]
     )
     return json(res, 200, { success: true, listingId: r.insertId })
   } catch (e) {
