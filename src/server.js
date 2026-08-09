@@ -436,10 +436,15 @@ app.get('/api/yishijie/saves/:playerId', async (req, res) => {
 
 app.post('/api/yishijie/saves/:playerId', async (req, res) => {
   try {
-    const { deviceFingerprint, apiKey, data } = req.body || {}
+    const { deviceFingerprint, apiKey, data, deviceTime } = req.body || {}
     const user = await authUser(req.params.playerId, deviceFingerprint, apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
     if (!data || typeof data !== 'object') return json(res, 400, { error: '存档数据无效' })
+    // 防调时间：客户端设备时间与服务器时间偏差超过 1 小时则拒绝（参照对决 data/ranking 校验）
+    const clientTime = Number(deviceTime || 0)
+    if (clientTime > 0 && Math.abs(Date.now() - clientTime) > 3600000) {
+      return json(res, 403, { error: '时间校验失败，请检查设备时间设置' })
+    }
     await writeSave(user.player_id, data)
     return json(res, 200, { success: true })
   } catch (e) {
@@ -459,28 +464,27 @@ function requireCompanionChannel(req, res) {
 app.post('/api/yishijie/exchange/list', async (req, res) => {
   try {
     if (!requireCompanionChannel(req, res)) return
-    const { playerId, deviceFingerprint, apiKey, key, name, img, qty, price, quality, dur, maxDur, category, pet, uid } = req.body || {}
+    const { playerId, deviceFingerprint, apiKey, key, name, img, qty, price, quality, dur, maxDur, category, pet, uid, petCaseId } = req.body || {}
     const user = await authUser(playerId, deviceFingerprint, apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
     if (!key || !(qty > 0) || !(price > 0)) return json(res, 400, { error: '参数不完整' })
     const save = await readSave(user.player_id)
     if (!save) return json(res, 400, { error: '没有存档' })
     if (category === 'pet') {
-      // 宠物挂单：按 id（兼容旧档按 key+lv+exp）从宠物背包移除
-      if (!pet || !pet.key) return json(res, 400, { error: '宠物数据不完整' })
-      const pets = (save.pets && save.pets.list) || []
-      let idx = -1
-      if (pet.id) idx = pets.findIndex(p => p && p.id === pet.id)
-      if (idx < 0) idx = pets.findIndex(p => p && p.key === pet.key && Number(p.lv || 1) === (Number(pet.lv) || 1) && Number(p.exp || 0) === (Number(pet.exp) || 0))
-      if (idx < 0) return json(res, 400, { error: '宠物背包里没有这只宠物' })
-      const p = pets.splice(idx, 1)[0]
-      if (!p.id) p.id = 'pet_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 6)
-      if (save.pets && save.pets.active === p.key) save.pets.active = ''
+      // 宠物挂单：只能卖装在宠物栏（宠物栏物品）里的宠物，从 survival.pet_cases 移除
+      if (!petCaseId) return json(res, 400, { error: '宠物必须装在宠物栏里才能出售' })
+      if (!save.pet_cases || !save.pet_cases.list) save.pet_cases = { list: [] }
+      const cases = save.pet_cases.list || []
+      const ci = cases.findIndex(c => c && c.id === petCaseId)
+      if (ci < 0) return json(res, 400, { error: '背包里没有这个宠物栏' })
+      const pc = cases.splice(ci, 1)[0]
+      const p = pc.pet || {}
+      if (!p || !p.key) return json(res, 400, { error: '宠物数据不完整' })
+      save.pet_cases.list = cases
       await writeSave(user.player_id, save)
-      const petUid = p.id || 'pet_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 6)
       const [r] = await pool.query(
         'INSERT INTO exchange_listings (seller_id, seller_name, item_key, item_name, item_uid, category, pet_json, item_img, qty, price, quality, affix_json, gem, dur, max_dur, broken) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [user.player_id, user.player_name, key, name || key, petUid, 'pet', JSON.stringify(p), img || '', 1, price, '', null, '', 0, 0, 0]
+        [user.player_id, user.player_name, p.key, name || p.name || p.key, pc.id || petCaseId, 'pet', JSON.stringify(p), img || '', 1, price, '', null, '', 0, 0, 0]
       )
       return json(res, 200, { success: true, listingId: r.insertId })
     }
@@ -615,14 +619,18 @@ app.post('/api/yishijie/exchange/buy', async (req, res) => {
         await conn.rollback()
         return json(res, 400, { error: '宠物数据异常' })
       }
-      if (!buyerSave.pets) buyerSave.pets = { list: [], active: '' }
-      if (buyerSave.pets.list.length >= 6) {
+      // 买家收到的是一只装在宠物栏里的宠物（宠物栏物品占一格）
+      if (!buyerSave.pet_cases) buyerSave.pet_cases = { list: [] }
+      if (buyerSave.pet_cases.list.length >= 60) {
         await conn.rollback()
-        return json(res, 400, { error: '宠物背包已满（最多6只）' })
+        return json(res, 400, { error: '宠物栏背包已满（最多60个）' })
       }
-      buyerSave.pets.list.push({
-        key: p.key, name: p.name || p.key, lv: Number(p.lv) || 1, exp: Number(p.exp) || 0,
-        boss: !!p.boss, elite: !!p.elite, id: p.id || undefined
+      buyerSave.pet_cases.list.push({
+        id: listing.item_uid || ('pc' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 6)),
+        pet: {
+          key: p.key, name: p.name || p.key, lv: Number(p.lv) || 1, exp: Number(p.exp) || 0,
+          boss: !!p.boss, elite: !!p.elite, id: p.id || undefined
+        }
       })
     } else {
       addItem(buyerSave, listing, listing.qty)
@@ -659,11 +667,14 @@ app.post('/api/yishijie/exchange/cancel', async (req, res) => {
     if (listing.category === 'pet') {
       const p = parseJsonSafe(listing.pet_json, null)
       if (!p || !p.key) return json(res, 400, { error: '宠物数据异常' })
-      if (!save.pets) save.pets = { list: [], active: '' }
-      if (save.pets.list.length >= 6) return json(res, 400, { error: '宠物背包已满（最多6只）' })
-      save.pets.list.push({
-        key: p.key, name: p.name || p.key, lv: Number(p.lv) || 1, exp: Number(p.exp) || 0,
-        boss: !!p.boss, elite: !!p.elite, id: p.id || undefined
+      if (!save.pet_cases) save.pet_cases = { list: [] }
+      if (save.pet_cases.list.length >= 60) return json(res, 400, { error: '宠物栏背包已满（最多60个）' })
+      save.pet_cases.list.push({
+        id: listing.item_uid || ('pc' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 6)),
+        pet: {
+          key: p.key, name: p.name || p.key, lv: Number(p.lv) || 1, exp: Number(p.exp) || 0,
+          boss: !!p.boss, elite: !!p.elite, id: p.id || undefined
+        }
       })
     } else {
       addItem(save, listing, listing.qty)
