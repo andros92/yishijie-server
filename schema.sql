@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS exchange_trade_history (
   listing_id INT NOT NULL,
   item_key VARCHAR(64) NOT NULL,
   item_name VARCHAR(64) NOT NULL,
+  item_uid VARCHAR(64) NOT NULL DEFAULT '',
   qty INT NOT NULL DEFAULT 1,
   price INT NOT NULL DEFAULT 0,
   fee INT NOT NULL DEFAULT 0,

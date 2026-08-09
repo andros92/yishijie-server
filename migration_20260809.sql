@@ -55,3 +55,4 @@ CREATE TABLE IF NOT EXISTS banned_fingerprints (
 ) ENGINE=InnoDB;
 
 ALTER TABLE exchange_listings ADD COLUMN item_uid VARCHAR(64) NOT NULL DEFAULT '';
+ALTER TABLE exchange_trade_history ADD COLUMN item_uid VARCHAR(64) NOT NULL DEFAULT '';

@@ -442,14 +442,31 @@ app.get('/api/yishijie/exchange/listings', async (req, res) => {
     const size = Math.min(50, Math.max(1, parseInt(req.query.size || '10', 10)))
     const offset = (page - 1) * size
     const cat = req.query.category || 'all'
-    let sql = 'SELECT * FROM exchange_listings WHERE status = "on"'
+    const mine = req.query.mine === '1'
+    const keyword = String(req.query.keyword || '').trim()
+    let sql = 'SELECT * FROM exchange_listings'
     const params = []
+    const conds = []
+    if (mine) {
+      const user = await authUser(req.query.playerId, req.query.deviceFingerprint, req.query.apiKey)
+      if (!user) return json(res, 403, { error: '鉴权失败' })
+      conds.push('seller_id = ?')
+      params.push(user.player_id)
+    } else {
+      conds.push('status = "on"')
+    }
     if (cat === 'item' || cat === 'gear' || cat === 'pet') {
-      sql += ' AND category = ?'
+      conds.push('category = ?')
       params.push(cat)
     }
+    if (keyword) {
+      conds.push('(item_name LIKE ? OR item_uid LIKE ? OR item_key LIKE ?)')
+      params.push('%' + keyword + '%', '%' + keyword + '%', '%' + keyword + '%')
+    }
+    if (conds.length) sql += ' WHERE ' + conds.join(' AND ')
     const [rows] = await pool.query(sql + ' ORDER BY id DESC LIMIT ? OFFSET ?', params.concat([size, offset]))
-    const [[{ total }]] = await pool.query(sql.replace('SELECT * FROM exchange_listings', 'SELECT COUNT(*) AS total'), params)
+    const countSql = sql.replace('SELECT * FROM exchange_listings', 'SELECT COUNT(*) AS total')
+    const [[{ total }]] = await pool.query(countSql, params)
     // 宠物挂单附上完整宠物数据，方便手环直接渲染
     const data = rows.map(r => {
       if (r.category === 'pet' && r.pet_json) {
@@ -514,8 +531,8 @@ app.post('/api/yishijie/exchange/buy', async (req, res) => {
     }
     await conn.query('UPDATE exchange_listings SET status = "sold" WHERE id = ?', [listing.id])
     await conn.query(
-      'INSERT INTO exchange_trade_history (listing_id, item_key, item_name, qty, price, fee, seller_id, buyer_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [listing.id, listing.item_key, listing.item_name, listing.qty, listing.price, fee, listing.seller_id, buyer.player_id]
+      'INSERT INTO exchange_trade_history (listing_id, item_key, item_name, item_uid, qty, price, fee, seller_id, buyer_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [listing.id, listing.item_key, listing.item_name, listing.item_uid || '', listing.qty, listing.price, fee, listing.seller_id, buyer.player_id]
     )
     await writeSave(listing.seller_id, sellerSave)
     await writeSave(buyer.player_id, buyerSave)
