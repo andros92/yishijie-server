@@ -56,3 +56,23 @@ CREATE TABLE IF NOT EXISTS banned_fingerprints (
 
 ALTER TABLE exchange_listings ADD COLUMN item_uid VARCHAR(64) NOT NULL DEFAULT '';
 ALTER TABLE exchange_trade_history ADD COLUMN item_uid VARCHAR(64) NOT NULL DEFAULT '';
+
+CREATE TABLE IF NOT EXISTS pvp_rooms (
+  code VARCHAR(8) NOT NULL PRIMARY KEY,
+  host_id VARCHAR(20) NOT NULL,
+  host_name VARCHAR(32) NOT NULL DEFAULT '',
+  guest_id VARCHAR(20) NULL,
+  guest_name VARCHAR(32) NOT NULL DEFAULT '',
+  status VARCHAR(16) NOT NULL DEFAULT 'waiting',
+  winner VARCHAR(20) NOT NULL DEFAULT '',
+  log TEXT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_status (status)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS pvp_daily (
+  player_id VARCHAR(20) NOT NULL,
+  day VARCHAR(8) NOT NULL,
+  used INT NOT NULL DEFAULT 0,
+  PRIMARY KEY (player_id, day)
+) ENGINE=InnoDB;

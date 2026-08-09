@@ -248,6 +248,86 @@ async function getRatingRow(playerId) {
   return rows.length ? rows[0] : null
 }
 
+function todayStr() {
+  const d = new Date()
+  return d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0')
+}
+
+async function pvpDailyUsed(playerId) {
+  const [rows] = await pool.query('SELECT used FROM pvp_daily WHERE player_id = ? AND day = ? LIMIT 1', [playerId, todayStr()])
+  return rows.length ? Number(rows[0].used) : 0
+}
+
+// 服务器端对战模拟（房间战用，双方快照 → 战报；与手环匹配战口径接近）
+function pvpBuildStats(save) {
+  const cls = save && save.class ? save.class : null
+  const st = save && save.stats ? save.stats : null
+  const eq = save && save.equip ? save.equip : null
+  const lv = st && Number(st.lv) > 0 ? Number(st.lv) : 1
+  const base = { hp: 80, atk: 8, def: 0, magic: 0, agi: 0, crit: 0, heal: 0 }
+  const clsBonus = {
+    warrior: { hp: 30, atk: 6, def: 4 },
+    knight: { hp: 70, atk: 2, def: 12 },
+    priest: { hp: 20, atk: 3, def: 6, heal: 8 },
+    mage: { hp: 10, atk: 1, def: 3, magic: 12 }
+  }
+  const b = cls && cls.key ? (clsBonus[cls.key] || {}) : {}
+  const eqAtk = 0
+  let atk = base.atk + (lv - 1) + (b.atk || 0) + eqAtk
+  const magic = base.magic + (lv - 1) + (b.magic || 0)
+  if (cls && cls.key === 'mage') atk = Math.max(1, Math.round(atk * 0.5))
+  const pets = (save && save.pets && save.pets.list) || []
+  let petDmg = 0
+  for (const p of pets.slice(0, 2)) petDmg += petPower(p)
+  return {
+    maxHp: base.hp + (lv - 1) * 8 + (b.hp || 0),
+    atk: Math.max(1, Math.round(atk * 0.9)),
+    magic: Math.round(magic * 0.9),
+    def: Math.round(((b.def || 0)) * 0.75),
+    crit: (b.crit || 0) + (cls && cls.key === 'warrior' ? 5 : 0),
+    agi: (b.agi || 0) + (cls && cls.key === 'mage' ? 5 : 0),
+    heal: (b.heal || 0),
+    petDmg: Math.round(petDmg * 0.8)
+  }
+}
+
+function pvpSimulate(a, b, aName, bName) {
+  let A = { hp: a.maxHp, ...a }
+  let B = { hp: b.maxHp, ...b }
+  const log = []
+  const aFirst = A.agi >= B.agi
+  const atk = (who, def) => {
+    const raw = Math.max(1, who.atk + (who.magic || 0) - Math.round(def.def * 0.5))
+    let dmg = raw
+    if (Math.random() * 100 < (who.crit || 0)) dmg = Math.round(dmg * 1.6)
+    return Math.max(1, dmg)
+  }
+  const heal = (who) => (who.heal || 0) > 0 ? Math.round(who.maxHp * who.heal / 100) : 0
+  for (let i = 0; i < 60 && A.hp > 0 && B.hp > 0; i++) {
+    if (aFirst) {
+      const d = atk(A, B); B.hp -= d; log.push(aName + ' 造成 ' + d + ' 伤害')
+      if (B.hp <= 0) break
+      const h = heal(B); if (h > 0) { B.hp = Math.min(B.maxHp, B.hp + h); log.push(bName + ' 回复 ' + h + ' 生命') }
+      const d2 = atk(B, A); A.hp -= d2; log.push(bName + ' 造成 ' + d2 + ' 伤害')
+      if (A.hp <= 0) break
+      const h2 = heal(A); if (h2 > 0) { A.hp = Math.min(A.maxHp, A.hp + h2); log.push(aName + ' 回复 ' + h2 + ' 生命') }
+    } else {
+      const d2 = atk(B, A); A.hp -= d2; log.push(bName + ' 造成 ' + d2 + ' 伤害')
+      if (A.hp <= 0) break
+      const h2 = heal(A); if (h2 > 0) { A.hp = Math.min(A.maxHp, A.hp + h2); log.push(aName + ' 回复 ' + h2 + ' 生命') }
+      const d = atk(A, B); B.hp -= d; log.push(aName + ' 造成 ' + d + ' 伤害')
+      if (B.hp <= 0) break
+      const h = heal(B); if (h > 0) { B.hp = Math.min(B.maxHp, B.hp + h); log.push(bName + ' 回复 ' + h + ' 生命') }
+    }
+    if (A.petDmg > 0 && B.hp > 0) { const pd = Math.max(1, Math.round(A.petDmg * (0.7 + Math.random() * 0.6))); B.hp -= pd; log.push(aName + ' 的宠物造成 ' + pd + ' 伤害') }
+    if (B.petDmg > 0 && A.hp > 0) { const pd = Math.max(1, Math.round(B.petDmg * (0.7 + Math.random() * 0.6))); A.hp -= pd; log.push(bName + ' 的宠物造成 ' + pd + ' 伤害') }
+  }
+  const aWin = A.hp > 0 && B.hp <= 0
+  const draw = A.hp > 0 && B.hp > 0
+  log.push(draw ? '平局！' : (aWin ? aName + ' 获胜！' : bName + ' 获胜！'))
+  return { aWin, winner: draw ? '' : (aWin ? 'host' : 'guest'), log }
+}
+
 function isGearListing(l) {
   return !!(l.quality || l.dur > 0 || l.max_dur > 0)
 }
@@ -974,6 +1054,14 @@ app.post('/api/yishijie/pvp/report', async (req, res) => {
     if (!targetId || targetId === user.player_id) return json(res, 400, { error: '目标无效' })
     const [tu] = await pool.query('SELECT player_id FROM users WHERE player_id = ? LIMIT 1', [targetId])
     if (!tu.length) return json(res, 404, { error: '目标玩家不存在' })
+    // 匹配战每日 12 次限制
+    const day = todayStr()
+    const used = await pvpDailyUsed(user.player_id)
+    if (used >= 12) return json(res, 403, { error: '今日匹配战次数已用完（12次），明天再来吧' })
+    await pool.query(
+      'INSERT INTO pvp_daily (player_id, day, used) VALUES (?, ?, 1) ON DUPLICATE KEY UPDATE used = used + 1',
+      [user.player_id, day]
+    )
     const winFlag = !!win
     const ra = await getRatingRow(user.player_id)
     const rd = await getRatingRow(targetId)
@@ -1006,7 +1094,111 @@ app.get('/api/yishijie/pvp/rating', async (req, res) => {
     const { playerId } = req.query
     if (!playerId) return json(res, 400, { error: '缺少玩家ID' })
     const row = await getRatingRow(playerId)
-    return json(res, 200, { success: true, rating: ratingOf(row), wins: row ? Number(row.wins) : 0, losses: row ? Number(row.losses) : 0 })
+    const used = await pvpDailyUsed(playerId)
+    return json(res, 200, { success: true, rating: ratingOf(row), wins: row ? Number(row.wins) : 0, losses: row ? Number(row.losses) : 0, dailyLeft: Math.max(0, 12 - used) })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+// ============ 房间对战（参照垃圾佬：4位房间码，双方确认后服务器模拟） ============
+async function cleanRooms() {
+  // 清理超过 2 小时的房间
+  await pool.query('DELETE FROM pvp_rooms WHERE created_at < DATE_SUB(NOW(), INTERVAL 2 HOUR)')
+}
+
+app.post('/api/yishijie/pvp/room/create', async (req, res) => {
+  try {
+    const { playerId, deviceFingerprint, apiKey } = req.body || {}
+    const user = await authUser(playerId, deviceFingerprint, apiKey)
+    if (!user) return json(res, 403, { error: '鉴权失败' })
+    await cleanRooms()
+    // 玩家只能在一个房间
+    await pool.query('DELETE FROM pvp_rooms WHERE (host_id = ? OR guest_id = ?) AND status IN ("waiting","ready")', [user.player_id, user.player_id])
+    let code = ''
+    for (let i = 0; i < 20; i++) {
+      code = String(Math.floor(1000 + Math.random() * 9000))
+      const [ex] = await pool.query('SELECT code FROM pvp_rooms WHERE code = ? LIMIT 1', [code])
+      if (!ex.length) break
+    }
+    await pool.query(
+      'INSERT INTO pvp_rooms (code, host_id, host_name) VALUES (?, ?, ?)',
+      [code, user.player_id, user.player_name]
+    )
+    return json(res, 200, { success: true, roomCode: code })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+app.post('/api/yishijie/pvp/room/join', async (req, res) => {
+  try {
+    const { playerId, deviceFingerprint, apiKey, roomCode } = req.body || {}
+    const user = await authUser(playerId, deviceFingerprint, apiKey)
+    if (!user) return json(res, 403, { error: '鉴权失败' })
+    const code = String(roomCode || '').trim()
+    if (!/^\d{4}$/.test(code)) return json(res, 400, { error: '房间码为4位数字' })
+    const [rows] = await pool.query('SELECT * FROM pvp_rooms WHERE code = ? LIMIT 1', [code])
+    if (!rows.length) return json(res, 404, { error: '房间不存在或已关闭' })
+    const room = rows[0]
+    if (room.status !== 'waiting') return json(res, 400, { error: '房间已满或已开始对战' })
+    if (room.host_id === user.player_id) return json(res, 400, { error: '不能加入自己的房间' })
+    await pool.query('DELETE FROM pvp_rooms WHERE (host_id = ? OR guest_id = ?) AND code <> ? AND status IN ("waiting","ready")', [user.player_id, user.player_id, code])
+    await pool.query('UPDATE pvp_rooms SET guest_id = ?, guest_name = ?, status = "ready" WHERE code = ?', [user.player_id, user.player_name, code])
+    return json(res, 200, { success: true, roomCode: code })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+app.get('/api/yishijie/pvp/room/:code', async (req, res) => {
+  try {
+    const code = req.params.code
+    const [rows] = await pool.query('SELECT * FROM pvp_rooms WHERE code = ? LIMIT 1', [code])
+    if (!rows.length) return json(res, 200, { success: false, error: '房间不存在或已关闭' })
+    const r = rows[0]
+    return json(res, 200, {
+      success: true,
+      room: {
+        code: r.code,
+        hostId: r.host_id,
+        hostName: r.host_name,
+        guestId: r.guest_id,
+        guestName: r.guest_name,
+        status: r.status,
+        winner: r.winner,
+        log: r.log || null
+      }
+    })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+app.post('/api/yishijie/pvp/room/fight', async (req, res) => {
+  try {
+    const { playerId, deviceFingerprint, apiKey, roomCode } = req.body || {}
+    const user = await authUser(playerId, deviceFingerprint, apiKey)
+    if (!user) return json(res, 403, { error: '鉴权失败' })
+    const code = String(roomCode || '').trim()
+    const [rows] = await pool.query('SELECT * FROM pvp_rooms WHERE code = ? LIMIT 1', [code])
+    if (!rows.length) return json(res, 404, { error: '房间不存在' })
+    const room = rows[0]
+    if (room.status === 'finished') return json(res, 400, { error: '对战已结束' })
+    if (user.player_id !== room.host_id && user.player_id !== room.guest_id) return json(res, 403, { error: '不是房间成员' })
+    if (!room.guest_id) return json(res, 400, { error: '等待对手加入' })
+    if (room.status !== 'ready') return json(res, 400, { error: '对战未就绪' })
+    const hostSave = await readSave(room.host_id)
+    const guestSave = await readSave(room.guest_id)
+    if (!hostSave || !guestSave) return json(res, 400, { error: '对手存档缺失' })
+    const h = pvpBuildStats(hostSave)
+    const g = pvpBuildStats(guestSave)
+    const result = pvpSimulate(h, g, room.host_name || room.host_id, room.guest_name || room.guest_id)
+    await pool.query(
+      'UPDATE pvp_rooms SET status = "finished", winner = ?, log = ? WHERE code = ?',
+      [result.winner, result.log.join('\n'), code]
+    )
+    return json(res, 200, { success: true, winner: result.winner, aWin: result.aWin, log: result.log })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
   }

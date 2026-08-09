@@ -134,6 +134,26 @@ CREATE TABLE IF NOT EXISTS pvp_matches (
   KEY idx_defender (defender_id)
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS pvp_rooms (
+  code VARCHAR(8) NOT NULL PRIMARY KEY,
+  host_id VARCHAR(20) NOT NULL,
+  host_name VARCHAR(32) NOT NULL DEFAULT '',
+  guest_id VARCHAR(20) NULL,
+  guest_name VARCHAR(32) NOT NULL DEFAULT '',
+  status VARCHAR(16) NOT NULL DEFAULT 'waiting',
+  winner VARCHAR(20) NOT NULL DEFAULT '',
+  log TEXT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_status (status)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS pvp_daily (
+  player_id VARCHAR(20) NOT NULL,
+  day VARCHAR(8) NOT NULL,
+  used INT NOT NULL DEFAULT 0,
+  PRIMARY KEY (player_id, day)
+) ENGINE=InnoDB;
+
 CREATE TABLE IF NOT EXISTS settings (
   skey VARCHAR(64) NOT NULL PRIMARY KEY,
   svalue VARCHAR(255) NOT NULL DEFAULT ''
