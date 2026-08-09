@@ -163,6 +163,18 @@ async function writeSave(playerId, data) {
   )
 }
 
+// 每个玩家的存档写操作串行化：readSave→改→writeSave 不是原子的，
+// 并发请求会互相覆盖（交易所双挂单/双买、邮件重复领取、充值重复到账都可能刷出物品）。
+// 单进程部署下用内存队列即可；多进程部署需改用数据库行锁。
+const playerLocks = new Map()
+function withPlayerLock(playerId, fn) {
+  const key = String(playerId || '')
+  const prev = playerLocks.get(key) || Promise.resolve()
+  const run = prev.then(fn, fn)
+  playerLocks.set(key, run.catch(() => {}))
+  return run
+}
+
 // ============ 存档内的金币/物品操作 ============
 function getCoins(save) {
   return (save && save.bag && typeof save.bag.coin === 'number') ? save.bag.coin : 0
@@ -468,6 +480,8 @@ app.post('/api/yishijie/exchange/list', async (req, res) => {
     const user = await authUser(playerId, deviceFingerprint, apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
     if (!key || !(qty > 0) || !(price > 0)) return json(res, 400, { error: '参数不完整' })
+    // 串行化本玩家的存档读写，防止并发挂单重复扣同一批物品
+    return withPlayerLock(user.player_id, async () => {
     const save = await readSave(user.player_id)
     if (!save) return json(res, 400, { error: '没有存档' })
     if (category === 'pet') {
@@ -532,6 +546,7 @@ app.post('/api/yishijie/exchange/list', async (req, res) => {
       [user.player_id, user.player_name, listing.item_key, listing.item_name, listing.item_uid || '', listing.category, listing.item_img, listing.qty, price, listing.quality, listing.affix_json, listing.gem, listing.dur, listing.max_dur, listing.broken]
     )
     return json(res, 200, { success: true, listingId: r.insertId })
+    })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
   }
@@ -584,71 +599,81 @@ app.get('/api/yishijie/exchange/listings', async (req, res) => {
 
 app.post('/api/yishijie/exchange/buy', async (req, res) => {
   if (!requireCompanionChannel(req, res)) return
-  const conn = await pool.getConnection()
   try {
     const { listingId, buyerId, deviceFingerprint, apiKey } = req.body || {}
     const buyer = await authUser(buyerId, deviceFingerprint, apiKey)
     if (!buyer) return json(res, 403, { error: '鉴权失败' })
-    await conn.beginTransaction()
-    const [ls] = await conn.query('SELECT * FROM exchange_listings WHERE id = ? AND status = "on" FOR UPDATE', [listingId])
-    if (!ls.length) {
-      await conn.rollback()
-      return json(res, 404, { error: '该挂单不存在或已售出' })
-    }
-    const listing = ls[0]
-    if (listing.seller_id === buyer.player_id) {
-      await conn.rollback()
-      return json(res, 400, { error: '不能购买自己挂的单' })
-    }
-    const sellerSave = await readSave(listing.seller_id)
-    const buyerSave = await readSave(buyer.player_id)
-    if (!buyerSave || getCoins(buyerSave) < listing.price) {
-      await conn.rollback()
-      return json(res, 400, { error: '金币不足' })
-    }
-    const fee = Math.floor(listing.price * EXCHANGE_FEE_RATE)
-    // 买家扣金币
-    setCoins(buyerSave, getCoins(buyerSave) - listing.price)
-    // 卖家收金币（扣手续费）
-    if (!sellerSave) sellerSave = { bag: { coin: 0 }, gear: {} }
-    setCoins(sellerSave, getCoins(sellerSave) + (listing.price - fee))
-    // 物品转给买家
-    if (listing.category === 'pet') {
-      const p = parseJsonSafe(listing.pet_json, null)
-      if (!p || !p.key) {
-        await conn.rollback()
-        return json(res, 400, { error: '宠物数据异常' })
-      }
-      // 买家收到的是一只装在宠物栏里的宠物（宠物栏物品占一格）
-      if (!buyerSave.pet_cases) buyerSave.pet_cases = { list: [] }
-      if (buyerSave.pet_cases.list.length >= 60) {
-        await conn.rollback()
-        return json(res, 400, { error: '宠物栏背包已满（最多60个）' })
-      }
-      buyerSave.pet_cases.list.push({
-        id: listing.item_uid || ('pc' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 6)),
-        pet: {
-          key: p.key, name: p.name || p.key, lv: Number(p.lv) || 1, exp: Number(p.exp) || 0,
-          boss: !!p.boss, elite: !!p.elite, id: p.id || undefined
+    const [pre] = await pool.query('SELECT seller_id FROM exchange_listings WHERE id = ? AND status = "on" LIMIT 1', [listingId])
+    if (!pre.length) return json(res, 404, { error: '该挂单不存在或已售出' })
+    if (pre[0].seller_id === buyer.player_id) return json(res, 400, { error: '不能购买自己挂的单' })
+    // 买家/卖家存档读写都串行化，防止并发购买/挂单/撤单互相覆盖
+    return withPlayerLock(buyer.player_id, () => withPlayerLock(pre[0].seller_id, async () => {
+      const conn = await pool.getConnection()
+      try {
+        await conn.beginTransaction()
+        const [ls] = await conn.query('SELECT * FROM exchange_listings WHERE id = ? AND status = "on" FOR UPDATE', [listingId])
+        if (!ls.length) {
+          await conn.rollback()
+          return json(res, 404, { error: '该挂单不存在或已售出' })
         }
-      })
-    } else {
-      addItem(buyerSave, listing, listing.qty)
-    }
-    await conn.query('UPDATE exchange_listings SET status = "sold" WHERE id = ?', [listing.id])
-    await conn.query(
-      'INSERT INTO exchange_trade_history (listing_id, item_key, item_name, item_uid, qty, price, fee, seller_id, buyer_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [listing.id, listing.item_key, listing.item_name, listing.item_uid || '', listing.qty, listing.price, fee, listing.seller_id, buyer.player_id]
-    )
-    await writeSave(listing.seller_id, sellerSave)
-    await writeSave(buyer.player_id, buyerSave)
-    await conn.commit()
-    return json(res, 200, { success: true, fee })
+        const listing = ls[0]
+        if (listing.seller_id !== pre[0].seller_id) {
+          await conn.rollback()
+          return json(res, 404, { error: '该挂单不存在或已售出' })
+        }
+        const sellerSave = await readSave(listing.seller_id)
+        const buyerSave = await readSave(buyer.player_id)
+        if (!buyerSave || getCoins(buyerSave) < listing.price) {
+          await conn.rollback()
+          return json(res, 400, { error: '金币不足' })
+        }
+        const fee = Math.floor(listing.price * EXCHANGE_FEE_RATE)
+        // 买家扣金币
+        setCoins(buyerSave, getCoins(buyerSave) - listing.price)
+        // 卖家收金币（扣手续费）
+        if (!sellerSave) sellerSave = { bag: { coin: 0 }, gear: {} }
+        setCoins(sellerSave, getCoins(sellerSave) + (listing.price - fee))
+        // 物品转给买家
+        if (listing.category === 'pet') {
+          const p = parseJsonSafe(listing.pet_json, null)
+          if (!p || !p.key) {
+            await conn.rollback()
+            return json(res, 400, { error: '宠物数据异常' })
+          }
+          // 买家收到的是一只装在宠物栏里的宠物（宠物栏物品占一格）
+          if (!buyerSave.pet_cases) buyerSave.pet_cases = { list: [] }
+          if (buyerSave.pet_cases.list.length >= 60) {
+            await conn.rollback()
+            return json(res, 400, { error: '宠物栏背包已满（最多60个）' })
+          }
+          buyerSave.pet_cases.list.push({
+            id: listing.item_uid || ('pc' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 6)),
+            pet: {
+              key: p.key, name: p.name || p.key, lv: Number(p.lv) || 1, exp: Number(p.exp) || 0,
+              boss: !!p.boss, elite: !!p.elite, id: p.id || undefined
+            }
+          })
+        } else {
+          addItem(buyerSave, listing, listing.qty)
+        }
+        await conn.query('UPDATE exchange_listings SET status = "sold" WHERE id = ?', [listing.id])
+        await conn.query(
+          'INSERT INTO exchange_trade_history (listing_id, item_key, item_name, item_uid, qty, price, fee, seller_id, buyer_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [listing.id, listing.item_key, listing.item_name, listing.item_uid || '', listing.qty, listing.price, fee, listing.seller_id, buyer.player_id]
+        )
+        await writeSave(listing.seller_id, sellerSave)
+        await writeSave(buyer.player_id, buyerSave)
+        await conn.commit()
+        return json(res, 200, { success: true, fee })
+      } catch (e) {
+        await conn.rollback()
+        throw e
+      } finally {
+        conn.release()
+      }
+    }))
   } catch (e) {
-    await conn.rollback()
     return json(res, 500, { error: '服务器错误：' + e.message })
-  } finally {
-    conn.release()
   }
 })
 
@@ -658,30 +683,58 @@ app.post('/api/yishijie/exchange/cancel', async (req, res) => {
     const { listingId, playerId, deviceFingerprint, apiKey } = req.body || {}
     const user = await authUser(playerId, deviceFingerprint, apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
-    const [ls] = await pool.query('SELECT * FROM exchange_listings WHERE id = ? AND status = "on" LIMIT 1', [listingId])
-    if (!ls.length) return json(res, 404, { error: '该挂单不存在或已售出' })
-    const listing = ls[0]
-    if (listing.seller_id !== user.player_id) return json(res, 403, { error: '只能撤自己的单' })
-    const save = await readSave(user.player_id)
-    if (!save) return json(res, 400, { error: '没有存档' })
-    if (listing.category === 'pet') {
-      const p = parseJsonSafe(listing.pet_json, null)
-      if (!p || !p.key) return json(res, 400, { error: '宠物数据异常' })
-      if (!save.pet_cases) save.pet_cases = { list: [] }
-      if (save.pet_cases.list.length >= 60) return json(res, 400, { error: '宠物栏背包已满（最多60个）' })
-      save.pet_cases.list.push({
-        id: listing.item_uid || ('pc' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 6)),
-        pet: {
-          key: p.key, name: p.name || p.key, lv: Number(p.lv) || 1, exp: Number(p.exp) || 0,
-          boss: !!p.boss, elite: !!p.elite, id: p.id || undefined
+    // 撤单加行锁：防止与并发购买竞态导致“已售出仍退款”（物品+金币双份）
+    return withPlayerLock(user.player_id, async () => {
+      const conn = await pool.getConnection()
+      try {
+        await conn.beginTransaction()
+        const [ls] = await conn.query('SELECT * FROM exchange_listings WHERE id = ? AND status = "on" FOR UPDATE', [listingId])
+        if (!ls.length) {
+          await conn.rollback()
+          return json(res, 404, { error: '该挂单不存在或已售出' })
         }
-      })
-    } else {
-      addItem(save, listing, listing.qty)
-    }
-    await writeSave(user.player_id, save)
-    await pool.query('UPDATE exchange_listings SET status = "cancelled" WHERE id = ?', [listing.id])
-    return json(res, 200, { success: true })
+        const listing = ls[0]
+        if (listing.seller_id !== user.player_id) {
+          await conn.rollback()
+          return json(res, 403, { error: '只能撤自己的单' })
+        }
+        const save = await readSave(user.player_id)
+        if (!save) {
+          await conn.rollback()
+          return json(res, 400, { error: '没有存档' })
+        }
+        if (listing.category === 'pet') {
+          const p = parseJsonSafe(listing.pet_json, null)
+          if (!p || !p.key) {
+            await conn.rollback()
+            return json(res, 400, { error: '宠物数据异常' })
+          }
+          if (!save.pet_cases) save.pet_cases = { list: [] }
+          if (save.pet_cases.list.length >= 60) {
+            await conn.rollback()
+            return json(res, 400, { error: '宠物栏背包已满（最多60个）' })
+          }
+          save.pet_cases.list.push({
+            id: listing.item_uid || ('pc' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 6)),
+            pet: {
+              key: p.key, name: p.name || p.key, lv: Number(p.lv) || 1, exp: Number(p.exp) || 0,
+              boss: !!p.boss, elite: !!p.elite, id: p.id || undefined
+            }
+          })
+        } else {
+          addItem(save, listing, listing.qty)
+        }
+        await writeSave(user.player_id, save)
+        await conn.query('UPDATE exchange_listings SET status = "cancelled" WHERE id = ?', [listing.id])
+        await conn.commit()
+        return json(res, 200, { success: true })
+      } catch (e) {
+        await conn.rollback()
+        throw e
+      } finally {
+        conn.release()
+      }
+    })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
   }
@@ -752,12 +805,18 @@ async function creditOrder(orderId) {
   if (!rows.length) throw new Error('订单不存在')
   const order = rows[0]
   if (order.status === 'paid') return
-  const save = await readSave(order.player_id)
-  if (save) {
-    if (order.item === 'coins') setCoins(save, getCoins(save) + order.qty)
-    await writeSave(order.player_id, save)
-  }
-  await pool.query('UPDATE recharge_orders SET status = "paid", paid_at = NOW() WHERE order_id = ?', [orderId])
+  // 玩家写锁 + 状态二次校验：防止并发回调重复到账
+  return withPlayerLock(order.player_id, async () => {
+    const [rows2] = await pool.query('SELECT * FROM recharge_orders WHERE order_id = ? LIMIT 1', [orderId])
+    if (!rows2.length) throw new Error('订单不存在')
+    if (rows2[0].status === 'paid') return
+    const save = await readSave(order.player_id)
+    if (save) {
+      if (order.item === 'coins') setCoins(save, getCoins(save) + order.qty)
+      await writeSave(order.player_id, save)
+    }
+    await pool.query('UPDATE recharge_orders SET status = "paid", paid_at = NOW() WHERE order_id = ? AND status <> "paid"', [orderId])
+  })
 }
 
 // ============ 爱发电充值（参照垃圾佬/对决战2：备注填 playerId + webhook 发奖） ============
@@ -817,7 +876,7 @@ app.post('/api/yishijie/payment/afdian-webhook', async (req, res) => {
         console.warn('[爱发电] 玩家不存在，已忽略:', uid)
         return json(res, 200, { ec: 200, em: '' })
       }
-      const [existing] = await conn.query('SELECT status FROM recharge_orders WHERE order_id = ? LIMIT 1', [orderId])
+      const [existing] = await conn.query('SELECT status FROM recharge_orders WHERE order_id = ? LIMIT 1 FOR UPDATE', [orderId])
       if (existing.length && existing[0].status === 'paid') {
         await conn.rollback()
         return json(res, 200, { ec: 200, em: '' })
@@ -886,19 +945,42 @@ app.post('/api/yishijie/mail/claim', async (req, res) => {
     const { playerId, deviceFingerprint, apiKey, mailId } = req.body || {}
     const user = await authUser(playerId, deviceFingerprint, apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
-    const [rows] = await pool.query('SELECT * FROM mail WHERE id = ? AND player_id = ? LIMIT 1', [mailId, user.player_id])
-    if (!rows.length) return json(res, 404, { error: '邮件不存在' })
-    const mail = rows[0]
-    if (mail.claimed) return json(res, 200, { success: true, already: true })
-    const save = await readSave(user.player_id)
-    let applied = { coins: 0, items: {}, gear: 0, pets: 0 }
-    if (save) {
-      const rewards = parseJsonSafe(mail.rewards_json, { coins: mail.coins || 0 })
-      applied = applyRewardsToSave(save, rewards)
-      await writeSave(user.player_id, save)
-    }
-    await pool.query('UPDATE mail SET claimed = 1 WHERE id = ?', [mail.id])
-    return json(res, 200, { success: true, coins: applied.coins, applied })
+    // 行锁 + 玩家写锁：防止并发领取同一封邮件导致奖励重复发放
+    return withPlayerLock(user.player_id, async () => {
+      const conn = await pool.getConnection()
+      try {
+        await conn.beginTransaction()
+        const [rows] = await conn.query('SELECT * FROM mail WHERE id = ? AND player_id = ? FOR UPDATE', [mailId, user.player_id])
+        if (!rows.length) {
+          await conn.rollback()
+          return json(res, 404, { error: '邮件不存在' })
+        }
+        const mail = rows[0]
+        if (mail.claimed) {
+          await conn.rollback()
+          return json(res, 200, { success: true, already: true })
+        }
+        const save = await readSave(user.player_id)
+        let applied = { coins: 0, items: {}, gear: 0, pets: 0 }
+        if (save) {
+          const rewards = parseJsonSafe(mail.rewards_json, { coins: mail.coins || 0 })
+          applied = applyRewardsToSave(save, rewards)
+          await writeSave(user.player_id, save)
+        }
+        const [up] = await conn.query('UPDATE mail SET claimed = 1 WHERE id = ? AND claimed = 0', [mail.id])
+        if (!up.affectedRows) {
+          await conn.rollback()
+          return json(res, 200, { success: true, already: true })
+        }
+        await conn.commit()
+        return json(res, 200, { success: true, coins: applied.coins, applied })
+      } catch (e) {
+        await conn.rollback()
+        throw e
+      } finally {
+        conn.release()
+      }
+    })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
   }
