@@ -1144,6 +1144,38 @@ app.get('/api/yishijie/pvp/targets', async (req, res) => {
   }
 })
 
+// Elo 匹配：返回与当前玩家段位最接近的 5 个对手（参照垃圾佬 battle_match）
+app.get('/api/yishijie/pvp/matchmake', async (req, res) => {
+  try {
+    const { playerId, deviceFingerprint, apiKey } = req.query
+    const user = await authUser(playerId, deviceFingerprint, apiKey)
+    if (!user) return json(res, 403, { error: '鉴权失败' })
+    const ra = ratingOf(await getRatingRow(user.player_id))
+    const [rows] = await pool.query(
+      'SELECT s.player_id, s.data, u.player_name, r.rating FROM saves s JOIN users u ON u.player_id = s.player_id LEFT JOIN pvp_ratings r ON r.player_id = s.player_id WHERE s.player_id <> ? AND u.banned = 0',
+      [user.player_id]
+    )
+    const list = []
+    for (const r of rows) {
+      const save = parseJsonSafe(r.data, null)
+      if (!save) continue
+      const st = parseJsonSafe(save.stats, null)
+      const rt = r.rating ? Number(r.rating) : 1000
+      list.push({
+        playerId: r.player_id,
+        playerName: r.player_name,
+        rating: rt,
+        diff: Math.abs(rt - ra),
+        lv: st ? (Number(st.lv) || 1) : 1
+      })
+    }
+    list.sort((a, b) => a.diff - b.diff || b.rating - a.rating)
+    return json(res, 200, { success: true, data: list.slice(0, 5) })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
 app.get('/api/yishijie/pvp/defender', async (req, res) => {
   try {
     const { playerId, deviceFingerprint, apiKey, targetId } = req.query
