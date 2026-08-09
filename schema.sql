@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS exchange_listings (
   seller_name VARCHAR(32) NOT NULL,
   item_key VARCHAR(64) NOT NULL,
   item_name VARCHAR(64) NOT NULL,
+  category VARCHAR(16) NOT NULL DEFAULT 'item',  -- item / gear / pet
+  pet_json TEXT NULL,
   item_img VARCHAR(255) NOT NULL DEFAULT '',
   qty INT NOT NULL DEFAULT 1,
   price INT NOT NULL DEFAULT 0,
@@ -41,7 +43,8 @@ CREATE TABLE IF NOT EXISTS exchange_listings (
   status VARCHAR(16) NOT NULL DEFAULT 'on',  -- on / sold / cancelled
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   KEY idx_status (status),
-  KEY idx_seller (seller_id)
+  KEY idx_seller (seller_id),
+  KEY idx_category (category)
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS exchange_trade_history (
@@ -85,9 +88,47 @@ CREATE TABLE IF NOT EXISTS mail (
   title VARCHAR(128) NOT NULL,
   content TEXT NOT NULL,
   coins INT NOT NULL DEFAULT 0,
+  rewards_json TEXT NULL,
   claimed TINYINT NOT NULL DEFAULT 0,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   KEY idx_player (player_id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS redeem_codes (
+  code VARCHAR(40) NOT NULL PRIMARY KEY,
+  rewards_json TEXT NOT NULL,
+  max_uses INT NOT NULL DEFAULT 1,
+  used_count INT NOT NULL DEFAULT 0,
+  expires_at DATETIME NULL,
+  description VARCHAR(255) NOT NULL DEFAULT '',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS redeem_uses (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  code VARCHAR(40) NOT NULL,
+  player_id VARCHAR(20) NOT NULL,
+  used_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_code_player (code, player_id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS pvp_ratings (
+  player_id VARCHAR(20) NOT NULL PRIMARY KEY,
+  rating INT NOT NULL DEFAULT 1000,
+  wins INT NOT NULL DEFAULT 0,
+  losses INT NOT NULL DEFAULT 0,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS pvp_matches (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  attacker_id VARCHAR(20) NOT NULL,
+  defender_id VARCHAR(20) NOT NULL,
+  attacker_win TINYINT NOT NULL DEFAULT 0,
+  rating_delta INT NOT NULL DEFAULT 0,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_attacker (attacker_id),
+  KEY idx_defender (defender_id)
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS settings (

@@ -1,6 +1,6 @@
 # 异世界传说 服务端
 
-参照《开箱游戏 / 对决》服务端实现：注册/登录、存档上传下载、交易所（10% 手续费）、充值订单与回调、公告/版本。
+参照《开箱游戏 / 对决 / 垃圾佬》服务端实现：注册/登录、存档上传下载、交易所（10% 手续费）、充值订单与回调、邮箱（任意奖励）、激活码、排行榜、PVP、公告/版本。
 
 ## 部署
 
@@ -38,9 +38,18 @@ WantedBy=multi-user.target
 - `POST /exchange/buy` 购买（买家存档扣金币、卖家存档收金币、物品转给买家）
 - `POST /exchange/cancel` 撤单（物品退回卖家存档）
 - `GET /exchange/history?playerId=` 成交记录
+- `GET /exchange/listings?category=item|gear|pet` 分类筛选在售挂单
+- `POST /exchange/list` 支持 `category: "pet"` + `pet`（宠物对象）挂宠物单
 - `POST /recharge/order` 创建充值订单
 - `POST /recharge/callback` 支付回调（校验 XS-Sign）
 - `POST /admin/mark-paid` 手动确认订单到账（测试用，需管理密钥）
+- `GET /mail/:playerId` 邮件列表（含 rewards 奖励对象）
+- `POST /mail/claim` 领取邮件（金币/物品/装备/宠物直接写入存档）
+- `POST /admin/mail/send` 发邮件，奖励结构 `{coins, items:{key:n}, gear:[], pets:[]}`
+- `POST /redeem/redeem` 激活码兑换（奖励发到邮箱）
+- `POST /admin/code/create` `GET /admin/code/list` `DELETE /admin/code/:code` 激活码管理
+- `GET /leaderboard?type=level|pet|tower` 排行榜
+- `GET /pvp/targets` `GET /pvp/defender` `POST /pvp/report` `GET /pvp/rating` PVP（AI 代守 + 积分）
 - `GET /announcements` 公告
 - `GET /version` 版本号
 - `GET /health` 健康检查
