@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>异世界传说 · 管理后台</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0b0f1f; color: #e8edf5; font-family: "Microsoft YaHei", sans-serif; }
+  header { display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; background: linear-gradient(135deg, #151b36, #1c2450); border-bottom: 1px solid #2e3d67; }
+  header h1 { font-size: 18px; color: #f5c453; }
+  #secState { font-size: 12px; color: #8fa3d9; }
+  nav { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 20px; background: #0e1428; border-bottom: 1px solid #1e2a40; }
+  nav button { padding: 7px 14px; border: 1px solid #2e3d67; border-radius: 8px; background: #141c34; color: #c7cfe8; cursor: pointer; font-size: 13px; }
+  nav button.on { background: #f5c453; color: #0b0f1f; font-weight: bold; border-color: #f5c453; }
+  main { padding: 16px 20px; }
+  section { display: none; }
+  section.on { display: block; }
+  h2 { font-size: 15px; color: #f5c453; margin-bottom: 12px; }
+  .card { background: #101631; border: 1px solid #1e2a40; border-radius: 12px; padding: 14px; margin-bottom: 14px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+  .stat { background: #141c34; border: 1px solid #2e3d67; border-radius: 10px; padding: 12px; text-align: center; }
+  .stat b { display: block; font-size: 20px; color: #72f0ca; }
+  .stat span { font-size: 12px; color: #8fa3d9; }
+  label { display: block; font-size: 12px; color: #8fa3d9; margin: 8px 0 4px; }
+  input, textarea, select { width: 100%; padding: 8px 10px; border: 1px solid #2e3d67; border-radius: 8px; background: #0c1120; color: #e8edf5; font-size: 13px; }
+  textarea { min-height: 70px; resize: vertical; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .row > div { flex: 1; min-width: 160px; }
+  button.act { padding: 8px 16px; border: none; border-radius: 8px; background: #f5c453; color: #0b0f1f; font-weight: bold; cursor: pointer; margin-top: 10px; font-size: 13px; }
+  button.ghost { background: #1a2545; color: #c7cfe8; border: 1px solid #2e3d67; }
+  button.danger { background: #b3323e; color: #fff; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { padding: 7px 8px; border-bottom: 1px solid #1e2a40; text-align: left; vertical-align: top; }
+  th { color: #8fa3d9; }
+  td .mini { font-size: 11px; color: #8fa3d9; }
+  .ops button { margin-right: 6px; padding: 4px 8px; border-radius: 6px; border: 1px solid #2e3d67; background: #1a2545; color: #c7cfe8; font-size: 12px; cursor: pointer; }
+  #msg { position: fixed; right: 20px; top: 60px; max-width: 320px; padding: 10px 14px; border-radius: 8px; background: #1a3a2a; border: 1px solid #4fd8a8; color: #c9f7e5; font-size: 13px; display: none; z-index: 9; }
+  #msg.err { background: #3a1a1e; border-color: #ff6b7a; color: #ffd9dc; }
+  pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; color: #9fb0d9; }
+</style>
+</head>
+<body>
+<header>
+  <h1>异世界传说 · 管理后台</h1>
+  <span id="secState"></span>
+</header>
+<nav id="nav"></nav>
+<main>
+  <section id="sec-overview" class="on">
+    <div class="card" id="statsCard"><div class="grid" id="statsGrid"></div></div>
+  </section>
+
+  <section id="sec-version">
+    <div class="card">
+      <h2>版本推送（手机端检查更新用）</h2>
+      <label>versionCode（数字，必须大于当前包内版本号才会弹更新）</label>
+      <input id="vCode" type="number" placeholder="例如 2">
+      <label>versionName</label>
+      <input id="vName" placeholder="例如 0.2.0">
+      <label>下载链接（APK 直链；手机端“立即更新”会跳转）</label>
+      <input id="vUrl" placeholder="https://.../app.apk">
+      <label>更新说明</label>
+      <textarea id="vNotes" placeholder="本次更新内容，一行一条"></textarea>
+      <button class="act" onclick="loadVersion()">读取当前配置</button>
+      <button class="act" onclick="saveVersion()">保存并推送更新</button>
+    </div>
+  </section>
+
+  <section id="sec-players">
+    <div class="card">
+      <div class="row">
+        <div>
+          <label>搜索（玩家ID / 昵称）</label>
+          <input id="pKeyword" placeholder="输入关键字">
+        </div>
+        <div style="min-width:80px">
+          <label>&nbsp;</label>
+          <button class="act" onclick="loadPlayers()">搜索</button>
+        </div>
+      </div>
+    </div>
+    <div class="card" id="playersCard"><table id="playersTable"></table></div>
+  </section>
+
+  <section id="sec-blacklist">
+    <div class="card">
+      <h2>设备黑名单</h2>
+      <div class="row">
+        <div>
+          <label>设备指纹（从玩家数据里复制）</label>
+          <input id="bfFp" placeholder="设备指纹">
+        </div>
+        <div>
+          <label>封禁原因</label>
+          <input id="bfReason" placeholder="原因">
+        </div>
+        <div style="min-width:80px">
+          <label>&nbsp;</label>
+          <button class="act" onclick="addBlacklist()">拉黑</button>
+        </div>
+      </div>
+    </div>
+    <div class="card" id="blacklistCard"><table id="blacklistTable"></table></div>
+  </section>
+
+  <section id="sec-announce">
+    <div class="card">
+      <h2>发布公告</h2>
+      <label>标题</label>
+      <input id="aTitle" placeholder="公告标题">
+      <label>内容</label>
+      <textarea id="aContent" placeholder="公告内容"></textarea>
+      <button class="act" onclick="addAnnounce()">发布</button>
+    </div>
+    <div class="card" id="announceCard"><table id="announceTable"></table></div>
+  </section>
+
+  <section id="sec-mail">
+    <div class="card">
+      <h2>发送邮件（奖励）</h2>
+      <label>玩家 ID</label>
+      <input id="mPlayer" placeholder="玩家 ID">
+      <div class="row">
+        <div>
+          <label>标题</label>
+          <input id="mTitle" placeholder="标题">
+        </div>
+        <div>
+          <label>金币</label>
+          <input id="mCoins" type="number" placeholder="0">
+        </div>
+      </div>
+      <label>内容</label>
+      <textarea id="mContent" placeholder="内容"></textarea>
+      <label>奖励 JSON（可选，如 {"items":{"iron_ingot":5},"gear":[...],"pets":[...]}）</label>
+      <textarea id="mRewards" placeholder='{"items":{"spirit_crystal":10}}'></textarea>
+      <button class="act" onclick="sendMail()">发送</button>
+    </div>
+  </section>
+
+  <section id="sec-codes">
+    <div class="card">
+      <h2>创建激活码</h2>
+      <div class="row">
+        <div>
+          <label>激活码</label>
+          <input id="cCode" placeholder="如 HAPPY100">
+        </div>
+        <div>
+          <label>可用次数（0=不限）</label>
+          <input id="cMax" type="number" placeholder="1">
+        </div>
+        <div>
+          <label>过期时间（留空=永久）</label>
+          <input id="cExpire" type="datetime-local">
+        </div>
+      </div>
+      <label>描述</label>
+      <input id="cDesc" placeholder="描述">
+      <label>奖励 JSON</label>
+      <textarea id="cRewards" placeholder='{"coins":1000,"items":{"wood":50}}'></textarea>
+      <button class="act" onclick="createCode()">创建</button>
+    </div>
+    <div class="card" id="codesCard"><table id="codesTable"></table></div>
+  </section>
+
+  <section id="sec-saves">
+    <div class="card">
+      <h2>最近存档</h2>
+      <table id="savesTable"></table>
+    </div>
+  </section>
+
+  <section id="sec-listings">
+    <div class="card">
+      <h2>交易所挂单（最近 200 条）</h2>
+      <table id="listingsTable"></table>
+    </div>
+  </section>
+</main>
+<div id="msg"></div>
+
+<script>
+var SECRET = new URLSearchParams(location.search).get('secret') || '';
+var SECTIONS = [['overview','概览'],['version','版本推送'],['players','玩家管理'],['blacklist','设备黑名单'],['announce','公告'],['mail','邮件'],['codes','激活码'],['saves','存档'],['listings','挂单']];
+
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+
+function qs(path) { return path + (path.indexOf('?') >= 0 ? '&' : '?') + 'secret=' + encodeURIComponent(SECRET); }
+
+async function api(path, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
+  if (opts.body && typeof opts.body === 'object') {
+    opts.body = Object.assign({ secret: SECRET }, opts.body);
+    opts.body = JSON.stringify(opts.body);
+  }
+  var res = await fetch(qs(path), opts);
+  var data = null;
+  try { data = await res.json(); } catch (e) {}
+  if (!res.ok || (data && data.error)) {
+    throw new Error((data && data.error) || ('HTTP ' + res.status));
+  }
+  return data || {};
+}
+
+function msg(txt, isErr) {
+  var el = document.getElementById('msg');
+  el.textContent = txt;
+  el.className = isErr ? 'err' : '';
+  el.style.display = 'block';
+  setTimeout(function(){ el.style.display = 'none'; }, 3200);
+}
+
+function renderNav() {
+  var nav = document.getElementById('nav');
+  nav.innerHTML = '';
+  SECTIONS.forEach(function(s){
+    var b = document.createElement('button');
+    b.textContent = s[1];
+    b.onclick = function(){ switchTo(s[0]); };
+    nav.appendChild(b);
+  });
+  document.getElementById('secState').textContent = SECRET ? '已连接 · 密钥已配置' : '未配置密钥';
+}
+
+function switchTo(key) {
+  document.querySelectorAll('section').forEach(function(s){ s.classList.remove('on'); });
+  document.getElementById('sec-' + key).classList.add('on');
+  document.querySelectorAll('nav button').forEach(function(b, i){
+    b.classList.toggle('on', SECTIONS[i][0] === key);
+  });
+  if (key === 'overview') loadStats();
+  if (key === 'version') loadVersion();
+  if (key === 'players') loadPlayers();
+  if (key === 'blacklist') loadBlacklist();
+  if (key === 'announce') loadAnnounces();
+  if (key === 'codes') loadCodes();
+  if (key === 'saves') loadSaves();
+  if (key === 'listings') loadListings();
+}
+
+// ========== 概览 ==========
+async function loadStats() {
+  try {
+    var d = await api('/api/yishijie/admin/stats');
+    var s = d.data || {};
+    var items = [['玩家', s.users], ['存档', s.saves], ['在售挂单', s.listings], ['已支付订单', s.paidOrders], ['邮件', s.mails], ['封禁', s.bannedUsers]];
+    document.getElementById('statsGrid').innerHTML = items.map(function(it){
+      return '<div class="stat"><b>' + esc(it[1]) + '</b><span>' + esc(it[0]) + '</span></div>';
+    }).join('');
+  } catch (e) { msg('统计加载失败：' + e.message, true); }
+}
+
+// ========== 版本推送 ==========
+async function loadVersion() {
+  try {
+    var d = await api('/api/yishijie/version');
+    document.getElementById('vCode').value = d.versionCode || 1;
+    document.getElementById('vName').value = d.versionName || '';
+    document.getElementById('vUrl').value = d.downloadUrl || '';
+    document.getElementById('vNotes').value = d.updateNotes || '';
+    msg('已读取当前版本配置');
+  } catch (e) { msg('读取失败：' + e.message, true); }
+}
+
+async function saveVersion() {
+  var body = {
+    versionCode: parseInt(document.getElementById('vCode').value, 10) || 1,
+    versionName: document.getElementById('vName').value.trim(),
+    downloadUrl: document.getElementById('vUrl').value.trim(),
+    updateNotes: document.getElementById('vNotes').value.trim()
+  };
+  try {
+    await api('/api/yishijie/admin/version', { method: 'POST', body: body });
+    msg('版本信息已保存，手机端检查更新即可看到');
+  } catch (e) { msg('保存失败：' + e.message, true); }
+}
+
+// ========== 玩家管理 ==========
+async function loadPlayers() {
+  var kw = document.getElementById('pKeyword').value.trim();
+  try {
+    var d = await api('/api/yishijie/admin/users?keyword=' + encodeURIComponent(kw));
+    var rows = d.data || [];
+    if (!rows.length) { document.getElementById('playersTable').innerHTML = '<tr><td>无玩家</td></tr>'; return; }
+    document.getElementById('playersTable').innerHTML =
+      '<tr><th>ID</th><th>昵称</th><th>等级</th><th>金币</th><th>状态</th><th>操作</th></tr>' +
+      rows.map(function(r){
+        return '<tr><td>' + esc(r.playerId) + '</td>' +
+          '<td>' + esc(r.playerName) + '</td>' +
+          '<td>' + esc(r.lv) + '</td>' +
+          '<td>' + esc(r.gold) + '</td>' +
+          '<td>' + (r.banned ? '<span style="color:#ff6b7a">已封</span>' : '正常') + '</td>' +
+          '<td class="ops">' +
+          '<button onclick="renamePlayer(\'' + esc(r.playerId) + '\')">改名</button>' +
+          (r.banned
+            ? '<button onclick="setBan(\'' + esc(r.playerId) + '\',false)">解封</button>'
+            : '<button onclick="setBan(\'' + esc(r.playerId) + '\',true)">封禁</button>') +
+          '<button onclick="punishPlayer(\'' + esc(r.playerId) + '\')">制裁</button>' +
+          '<button class="danger" onclick="deletePlayer(\'' + esc(r.playerId) + '\')">删除</button>' +
+          '</td></tr>';
+      }).join('');
+  } catch (e) { msg('玩家加载失败：' + e.message, true); }
+}
+
+async function renamePlayer(pid) {
+  var name = prompt('输入新昵称（2-12字）');
+  if (!name) return;
+  try {
+    await api('/api/yishijie/admin/rename', { method: 'POST', body: { playerId: pid, newName: name.trim() } });
+    msg('已改名'); loadPlayers();
+  } catch (e) { msg('失败：' + e.message, true); }
+}
+
+async function setBan(pid, banned) {
+  var reason = banned ? (prompt('封禁原因') || '违规行为') : '';
+  try {
+    await api('/api/yishijie/admin/' + (banned ? 'ban' : 'unban'), { method: 'POST', body: { playerId: pid, reason: reason } });
+    msg(banned ? '已封禁' : '已解封'); loadPlayers();
+  } catch (e) { msg('失败：' + e.message, true); }
+}
+
+async function punishPlayer(pid) {
+  if (!confirm('确认制裁该玩家（违规昵称+封号）？')) return;
+  try {
+    await api('/api/yishijie/punish', { method: 'POST', body: { playerId: pid, reason: '后台制裁' } });
+    msg('已制裁并封号'); loadPlayers();
+  } catch (e) { msg('失败：' + e.message, true); }
+}
+
+async function deletePlayer(pid) {
+  if (!confirm('确认永久删除该玩家及其全部数据？此操作不可恢复！')) return;
+  try {
+    await api('/api/yishijie/admin/player/' + encodeURIComponent(pid), { method: 'DELETE' });
+    msg('已删除'); loadPlayers();
+  } catch (e) { msg('失败：' + e.message, true); }
+}
+
+// ========== 设备黑名单 ==========
+async function loadBlacklist() {
+  try {
+    var d = await api('/api/yishijie/admin/banned-fingerprints');
+    var rows = d.data || d.fingerprints || [];
+    document.getElementById('blacklistTable').innerHTML =
+      '<tr><th>设备指纹</th><th>原因</th><th>时间</th><th>操作</th></tr>' +
+      rows.map(function(r){
+        var fp = r.fingerprint || r;
+        return '<tr><td>' + esc(fp) + '</td><td>' + esc(r.reason || '') + '</td><td>' + esc(r.created_at || '') + '</td>' +
+          '<td class="ops"><button class="danger" onclick="removeBlacklist(\'' + esc(fp) + '\')">移除</button></td></tr>';
+      }).join('');
+  } catch (e) { msg('黑名单加载失败：' + e.message, true); }
+}
+
+async function addBlacklist() {
+  var fp = document.getElementById('bfFp').value.trim();
+  var reason = document.getElementById('bfReason').value.trim();
+  if (!fp) { msg('请填写设备指纹', true); return; }
+  try {
+    await api('/api/yishijie/admin/banned-fingerprints', { method: 'POST', body: { fingerprint: fp, reason: reason } });
+    msg('已拉黑'); loadBlacklist();
+  } catch (e) { msg('失败：' + e.message, true); }
+}
+
+async function removeBlacklist(fp) {
+  try {
+    await api('/api/yishijie/admin/banned-fingerprints/' + encodeURIComponent(fp), { method: 'DELETE' });
+    msg('已移除'); loadBlacklist();
+  } catch (e) { msg('失败：' + e.message, true); }
+}
+
+// ========== 公告 ==========
+async function loadAnnounces() {
+  try {
+    var d = await api('/api/yishijie/admin/announcements');
+    var rows = d.data || [];
+    document.getElementById('announceTable').innerHTML =
+      '<tr><th>ID</th><th>标题</th><th>内容</th><th>时间</th><th>操作</th></tr>' +
+      rows.map(function(r){
+        return '<tr><td>' + esc(r.id) + '</td><td>' + esc(r.title) + '</td><td>' + esc(r.content) + '</td><td>' + esc(r.created_at) + '</td>' +
+          '<td class="ops"><button class="danger" onclick="deleteAnnounce(' + esc(r.id) + ')">删除</button></td></tr>';
+      }).join('');
+  } catch (e) { msg('公告加载失败：' + e.message, true); }
+}
+
+async function addAnnounce() {
+  var title = document.getElementById('aTitle').value.trim();
+  var content = document.getElementById('aContent').value.trim();
+  if (!title) { msg('请填写标题', true); return; }
+  try {
+    await api('/api/yishijie/admin/announcement', { method: 'POST', body: { title: title, content: content } });
+    msg('已发布'); document.getElementById('aTitle').value = ''; document.getElementById('aContent').value = ''; loadAnnounces();
+  } catch (e) { msg('失败：' + e.message, true); }
+}
+
+async function deleteAnnounce(id) {
+  try {
+    await api('/api/yishijie/admin/announcement/' + id, { method: 'DELETE' });
+    msg('已删除'); loadAnnounces();
+  } catch (e) { msg('失败：' + e.message, true); }
+}
+
+// ========== 邮件 ==========
+async function sendMail() {
+  var body = {
+    playerId: document.getElementById('mPlayer').value.trim(),
+    title: document.getElementById('mTitle').value.trim(),
+    content: document.getElementById('mContent').value.trim(),
+    coins: parseInt(document.getElementById('mCoins').value, 10) || 0
+  };
+  var rw = document.getElementById('mRewards').value.trim();
+  if (rw) {
+    try { body.rewards = JSON.parse(rw); }
+    catch (e) { msg('奖励 JSON 格式错误', true); return; }
+  }
+  if (!body.playerId || !body.title) { msg('请填写玩家ID和标题', true); return; }
+  try {
+    await api('/api/yishijie/admin/mail/send', { method: 'POST', body: body });
+    msg('邮件已发送');
+  } catch (e) { msg('失败：' + e.message, true); }
+}
+
+// ========== 激活码 ==========
+async function loadCodes() {
+  try {
+    var d = await api('/api/yishijie/admin/code/list');
+    var rows = d.codes || [];
+    document.getElementById('codesTable').innerHTML =
+      '<tr><th>激活码</th><th>描述</th><th>次数</th><th>过期</th><th>创建</th><th>操作</th></tr>' +
+      rows.map(function(r){
+        return '<tr><td>' + esc(r.code) + '</td><td>' + esc(r.description || '') + '</td><td>' + esc(r.used_count) + '/' + esc(r.max_uses) + '</td>' +
+          '<td>' + esc(r.expires_at || '永久') + '</td><td>' + esc(r.created_at) + '</td>' +
+          '<td class="ops"><button class="danger" onclick="deleteCode(\'' + esc(r.code) + '\')">删除</button></td></tr>';
+      }).join('');
+  } catch (e) { msg('激活码加载失败：' + e.message, true); }
+}
+
+async function createCode() {
+  var code = document.getElementById('cCode').value.trim();
+  var rw = document.getElementById('cRewards').value.trim();
+  var rewards = null;
+  try { rewards = JSON.parse(rw); } catch (e) { msg('奖励 JSON 格式错误', true); return; }
+  if (!code || !rewards) { msg('请填写激活码和奖励', true); return; }
+  var exp = document.getElementById('cExpire').value;
+  var body = {
+    code: code,
+    rewards: rewards,
+    maxUses: parseInt(document.getElementById('cMax').value, 10) || 1,
+    expiresAt: exp ? new Date(exp).toISOString() : null,
+    description: document.getElementById('cDesc').value.trim()
+  };
+  try {
+    await api('/api/yishijie/admin/code/create', { method: 'POST', body: body });
+    msg('激活码已创建'); loadCodes();
+  } catch (e) { msg('失败：' + e.message, true); }
+}
+
+async function deleteCode(code) {
+  try {
+    await api('/api/yishijie/admin/code/' + encodeURIComponent(code), { method: 'DELETE' });
+    msg('已删除'); loadCodes();
+  } catch (e) { msg('失败：' + e.message, true); }
+}
+
+// ========== 存档 / 挂单 ==========
+async function loadSaves() {
+  try {
+    var d = await api('/api/yishijie/admin/saves');
+    var rows = d.data || [];
+    document.getElementById('savesTable').innerHTML =
+      '<tr><th>玩家ID</th><th>昵称</th><th>最后同步</th></tr>' +
+      rows.map(function(r){
+        return '<tr><td>' + esc(r.player_id) + '</td><td>' + esc(r.player_name) + '</td><td>' + esc(r.updated_at) + '</td></tr>';
+      }).join('');
+  } catch (e) { msg('存档加载失败：' + e.message, true); }
+}
+
+async function loadListings() {
+  try {
+    var d = await api('/api/yishijie/admin/listings');
+    var rows = d.data || [];
+    document.getElementById('listingsTable').innerHTML =
+      '<tr><th>ID</th><th>卖家</th><th>物品</th><th>数量</th><th>价格</th><th>状态</th></tr>' +
+      rows.map(function(r){
+        return '<tr><td>' + esc(r.id) + '</td><td>' + esc(r.seller_name || r.seller_id) + '</td>' +
+          '<td>' + esc(r.item_name) + (r.quality ? ' [' + esc(r.quality) + ']' : '') + '</td>' +
+          '<td>' + esc(r.qty) + '</td><td>' + esc(r.price) + '</td><td>' + esc(r.status) + '</td></tr>';
+      }).join('');
+  } catch (e) { msg('挂单加载失败：' + e.message, true); }
+}
+
+renderNav();
+if (!SECRET) {
+  var s = prompt('请输入管理密钥 SECRET（或直接带 ?secret= 访问）');
+  if (s) { SECRET = s.trim(); renderNav(); }
+}
+switchTo('overview');
+</script>
+</body>
+</html>
