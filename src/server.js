@@ -1215,6 +1215,63 @@ app.post('/api/yishijie/pvp/report', async (req, res) => {
   }
 })
 
+// 手机端 PVP 匹配战：服务端直接模拟对战并结算（不再信任客户端上报胜负，防止自刷/改包）
+app.post('/api/yishijie/pvp/match', async (req, res) => {
+  try {
+    const { playerId, deviceFingerprint, apiKey, targetId } = req.body || {}
+    const user = await authUser(playerId, deviceFingerprint, apiKey)
+    if (!user) return json(res, 403, { error: '鉴权失败' })
+    if (!targetId || targetId === user.player_id) return json(res, 400, { error: '目标无效' })
+    const [tu] = await pool.query('SELECT player_id, player_name FROM users WHERE player_id = ? LIMIT 1', [targetId])
+    if (!tu.length) return json(res, 404, { error: '目标玩家不存在' })
+    // 匹配战每日 12 次限制
+    const day = todayStr()
+    const used = await pvpDailyUsed(user.player_id)
+    if (used >= 12) return json(res, 403, { error: '今日匹配战次数已用完（12次），明天再来吧' })
+    const aSave = await readSave(user.player_id)
+    const dSave = await readSave(targetId)
+    const a = pvpBuildStats(aSave || null)
+    const d = pvpBuildStats(dSave || null)
+    const result = pvpSimulate(a, d, user.player_name || user.player_id, tu[0].player_name || targetId)
+    const winFlag = !!result.aWin
+    await pool.query(
+      'INSERT INTO pvp_daily (player_id, day, used) VALUES (?, ?, 1) ON DUPLICATE KEY UPDATE used = used + 1',
+      [user.player_id, day]
+    )
+    const ra = await getRatingRow(user.player_id)
+    const rd = await getRatingRow(targetId)
+    const Ra = ratingOf(ra)
+    const Rd = ratingOf(rd)
+    const expectedA = 1 / (1 + Math.pow(10, (Rd - Ra) / 400))
+    const delta = Math.max(1, Math.round(32 * ((winFlag ? 1 : 0) - expectedA)))
+    const newRa = Math.max(0, Ra + delta)
+    const newRd = Math.max(0, Rd - delta)
+    await pool.query(
+      'INSERT INTO pvp_ratings (player_id, rating, wins, losses) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE rating = VALUES(rating), wins = wins + VALUES(wins), losses = losses + VALUES(losses)',
+      [user.player_id, newRa, winFlag ? 1 : 0, winFlag ? 0 : 1]
+    )
+    await pool.query(
+      'INSERT INTO pvp_ratings (player_id, rating, wins, losses) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE rating = VALUES(rating), wins = wins + VALUES(wins), losses = losses + VALUES(losses)',
+      [targetId, newRd, winFlag ? 0 : 1, winFlag ? 1 : 0]
+    )
+    await pool.query(
+      'INSERT INTO pvp_matches (attacker_id, defender_id, attacker_win, rating_delta) VALUES (?, ?, ?, ?)',
+      [user.player_id, targetId, winFlag ? 1 : 0, delta]
+    )
+    return json(res, 200, {
+      success: true,
+      winner: result.winner,
+      aWin: result.aWin,
+      delta,
+      rating: newRa,
+      dailyLeft: Math.max(0, 12 - (used + 1)),
+      log: result.log
+    })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
 app.get('/api/yishijie/pvp/rating', async (req, res) => {
   try {
     const { playerId } = req.query
