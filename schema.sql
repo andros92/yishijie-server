@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS exchange_listings (
   seller_name VARCHAR(32) NOT NULL,
   item_key VARCHAR(64) NOT NULL,
   item_name VARCHAR(64) NOT NULL,
+  item_uid VARCHAR(64) NOT NULL DEFAULT '',
   category VARCHAR(16) NOT NULL DEFAULT 'item',  -- item / gear / pet
   pet_json TEXT NULL,
   item_img VARCHAR(255) NOT NULL DEFAULT '',

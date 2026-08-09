@@ -273,12 +273,13 @@ function deductItem(save, listing, qty) {
 // 向存档加入物品
 function addItem(save, listing, qty) {
   if (!save.bag) save.bag = {}
-  if (isGearListing(listing)) {
-    if (!save.gear) save.gear = {}
-    if (!save.gear[listing.item_key]) save.gear[listing.item_key] = []
-    save.gear[listing.item_key].push({
-      key: listing.item_key,
-      quality: listing.quality || 'common',
+    if (isGearListing(listing)) {
+      if (!save.gear) save.gear = {}
+      if (!save.gear[listing.item_key]) save.gear[listing.item_key] = []
+      save.gear[listing.item_key].push({
+        key: listing.item_key,
+        uid: listing.item_uid || undefined,
+        quality: listing.quality || 'common',
       affixes: listing.affix_json ? JSON.parse(listing.affix_json) : [],
       gem: listing.gem || '',
       dur: listing.dur || 0,
@@ -387,9 +388,10 @@ app.post('/api/yishijie/exchange/list', async (req, res) => {
       if (!p.id) p.id = 'pet_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 6)
       if (save.pets && save.pets.active === p.key) save.pets.active = ''
       await writeSave(user.player_id, save)
+      const petUid = p.id || 'pet_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 6)
       const [r] = await pool.query(
-        'INSERT INTO exchange_listings (seller_id, seller_name, item_key, item_name, category, pet_json, item_img, qty, price, quality, affix_json, gem, dur, max_dur, broken) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [user.player_id, user.player_name, key, name || key, 'pet', JSON.stringify(p), img || '', 1, price, '', null, '', 0, 0, 0]
+        'INSERT INTO exchange_listings (seller_id, seller_name, item_key, item_name, item_uid, category, pet_json, item_img, qty, price, quality, affix_json, gem, dur, max_dur, broken) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [user.player_id, user.player_name, key, name || key, petUid, 'pet', JSON.stringify(p), img || '', 1, price, '', null, '', 0, 0, 0]
       )
       return json(res, 200, { success: true, listingId: r.insertId })
     }
@@ -408,9 +410,11 @@ app.post('/api/yishijie/exchange/list', async (req, res) => {
       const list = (save.gear && save.gear[key]) || []
       const inst = list[0]
       if (!inst) return json(res, 400, { error: '背包里没有这件装备' })
+      if (!inst.uid) inst.uid = 'it_' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 6)
       list.splice(0, 1)
       if (!list.length && save.gear) delete save.gear[key]
       listing.quality = inst.quality || ''
+      listing.item_uid = inst.uid
       listing.affix_json = inst.affixes && inst.affixes.length ? JSON.stringify(inst.affixes) : null
       listing.gem = inst.gem || ''
       listing.dur = inst.dur || 0
@@ -423,8 +427,8 @@ app.post('/api/yishijie/exchange/list', async (req, res) => {
     }
     await writeSave(user.player_id, save)
     const [r] = await pool.query(
-      'INSERT INTO exchange_listings (seller_id, seller_name, item_key, item_name, category, item_img, qty, price, quality, affix_json, gem, dur, max_dur, broken) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [user.player_id, user.player_name, listing.item_key, listing.item_name, 'item', listing.item_img, listing.qty, price, listing.quality, listing.affix_json, listing.gem, listing.dur, listing.max_dur, listing.broken]
+      'INSERT INTO exchange_listings (seller_id, seller_name, item_key, item_name, item_uid, category, item_img, qty, price, quality, affix_json, gem, dur, max_dur, broken) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [user.player_id, user.player_name, listing.item_key, listing.item_name, listing.item_uid || '', 'item', listing.item_img, listing.qty, price, listing.quality, listing.affix_json, listing.gem, listing.dur, listing.max_dur, listing.broken]
     )
     return json(res, 200, { success: true, listingId: r.insertId })
   } catch (e) {
