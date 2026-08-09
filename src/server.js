@@ -443,7 +443,7 @@ app.post('/api/yishijie/saves/:playerId', async (req, res) => {
     // 防调时间：客户端设备时间与服务器时间偏差超过 1 小时则拒绝（参照对决 data/ranking 校验）
     const clientTime = Number(deviceTime || 0)
     if (clientTime > 0 && Math.abs(Date.now() - clientTime) > 3600000) {
-      return json(res, 403, { error: '时间校验失败，请检查设备时间设置' })
+      return json(res, 403, { error: '时间校验失败，请检查设备时间设置', serverTime: Date.now(), deviceTime: clientTime })
     }
     await writeSave(user.player_id, data)
     return json(res, 200, { success: true })
