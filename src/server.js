@@ -1622,10 +1622,12 @@ app.post('/api/yishijie/rename', async (req, res) => {
     const name = sanitizeNickname(newName)
     if (name.length < 2) return json(res, 400, { error: '名字长度需要 2-12 个字符' })
     if (user.name_changed_at) {
-      const last = new Date(user.name_changed_at)
-      const now = new Date()
-      if (last.getFullYear() === now.getFullYear() && last.getMonth() === now.getMonth()) {
-        return json(res, 403, { error: '本月已修改过名字，请下个月再试' })
+      const last = new Date(user.name_changed_at).getTime()
+      const diff = Date.now() - last
+      const MONTH_MS = 30 * 24 * 3600 * 1000
+      if (diff < MONTH_MS) {
+        const remainDays = Math.ceil((MONTH_MS - diff) / (24 * 3600 * 1000))
+        return json(res, 403, { error: `一个月内只能修改一次昵称，还需等待 ${remainDays} 天` })
       }
     }
     const lower = name.toLowerCase()
