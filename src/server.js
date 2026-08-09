@@ -448,9 +448,18 @@ app.post('/api/yishijie/saves/:playerId', async (req, res) => {
 })
 
 // ============ 交易所 ============
+// 交易所挂单/购买/撤单只允许从手环伴侣通道发起（手机端无背包数据，防止脱离手环刷数据）
+function requireCompanionChannel(req, res) {
+  if (req.header('x-yishijie-channel') !== 'companion') {
+    return json(res, 403, { error: '交易所仅支持手环操作，请连接手机伴侣后从手环进入' })
+  }
+  return true
+}
+
 app.post('/api/yishijie/exchange/list', async (req, res) => {
   try {
-    const { playerId, deviceFingerprint, apiKey, key, name, img, qty, price, quality, dur, maxDur, category, pet } = req.body || {}
+    if (!requireCompanionChannel(req, res)) return
+    const { playerId, deviceFingerprint, apiKey, key, name, img, qty, price, quality, dur, maxDur, category, pet, uid } = req.body || {}
     const user = await authUser(playerId, deviceFingerprint, apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
     if (!key || !(qty > 0) || !(price > 0)) return json(res, 400, { error: '参数不完整' })
@@ -475,7 +484,7 @@ app.post('/api/yishijie/exchange/list', async (req, res) => {
       )
       return json(res, 200, { success: true, listingId: r.insertId })
     }
-    const isGear = !!(quality || dur || maxDur)
+    const isGear = category === 'gear' || !!(quality || dur || maxDur)
     const listing = {
       item_key: key,
       item_name: name || key,
@@ -486,12 +495,20 @@ app.post('/api/yishijie/exchange/list', async (req, res) => {
       quality: '', affix_json: null, gem: '', dur: 0, max_dur: 0, broken: 0
     }
     if (isGear) {
-      // 装备：取该 key 的第一件实例做快照，保证品质/宝石/耐久/词条完整，再从存档移除
+      // 装备：优先按 uid 匹配实例（手环背包直接选择），未带 uid 时兼容取第一件
       const list = (save.gear && save.gear[key]) || []
-      const inst = list[0]
+      let inst = null
+      let idx = -1
+      if (uid) {
+        idx = list.findIndex(g => g && g.uid === uid)
+        if (idx >= 0) inst = list[idx]
+      } else if (list.length) {
+        inst = list[0]
+        idx = 0
+      }
       if (!inst) return json(res, 400, { error: '背包里没有这件装备' })
       if (!inst.uid) inst.uid = 'it_' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 6)
-      list.splice(0, 1)
+      list.splice(idx, 1)
       if (!list.length && save.gear) delete save.gear[key]
       listing.quality = inst.quality || ''
       listing.item_uid = inst.uid
@@ -508,7 +525,7 @@ app.post('/api/yishijie/exchange/list', async (req, res) => {
     await writeSave(user.player_id, save)
     const [r] = await pool.query(
       'INSERT INTO exchange_listings (seller_id, seller_name, item_key, item_name, item_uid, category, item_img, qty, price, quality, affix_json, gem, dur, max_dur, broken) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [user.player_id, user.player_name, listing.item_key, listing.item_name, listing.item_uid || '', 'item', listing.item_img, listing.qty, price, listing.quality, listing.affix_json, listing.gem, listing.dur, listing.max_dur, listing.broken]
+      [user.player_id, user.player_name, listing.item_key, listing.item_name, listing.item_uid || '', listing.category, listing.item_img, listing.qty, price, listing.quality, listing.affix_json, listing.gem, listing.dur, listing.max_dur, listing.broken]
     )
     return json(res, 200, { success: true, listingId: r.insertId })
   } catch (e) {
@@ -562,6 +579,7 @@ app.get('/api/yishijie/exchange/listings', async (req, res) => {
 })
 
 app.post('/api/yishijie/exchange/buy', async (req, res) => {
+  if (!requireCompanionChannel(req, res)) return
   const conn = await pool.getConnection()
   try {
     const { listingId, buyerId, deviceFingerprint, apiKey } = req.body || {}
@@ -628,6 +646,7 @@ app.post('/api/yishijie/exchange/buy', async (req, res) => {
 
 app.post('/api/yishijie/exchange/cancel', async (req, res) => {
   try {
+    if (!requireCompanionChannel(req, res)) return
     const { listingId, playerId, deviceFingerprint, apiKey } = req.body || {}
     const user = await authUser(playerId, deviceFingerprint, apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
