@@ -777,34 +777,46 @@ app.post('/api/yishijie/payment/afdian-webhook', async (req, res) => {
       console.warn('[爱发电] 无效订单数据（备注playerId/订单号）:', JSON.stringify({ uid, orderId: outTradeNo }))
       return json(res, 200, { ec: 200, em: '' })
     }
-    const [urows] = await pool.query('SELECT player_id FROM users WHERE player_id = ? LIMIT 1', [String(uid)])
-    if (!urows.length) {
-      console.warn('[爱发电] 玩家不存在，已忽略:', uid)
-      return json(res, 200, { ec: 200, em: '' })
-    }
     const orderId = 'AF' + outTradeNo
-    const [existing] = await pool.query('SELECT status FROM recharge_orders WHERE order_id = ? LIMIT 1', [orderId])
-    if (existing.length && existing[0].status === 'paid') {
+    const conn = await pool.getConnection()
+    try {
+      await conn.beginTransaction()
+      const [urows] = await conn.query('SELECT player_id FROM users WHERE player_id = ? LIMIT 1', [String(uid)])
+      if (!urows.length) {
+        await conn.rollback()
+        console.warn('[爱发电] 玩家不存在，已忽略:', uid)
+        return json(res, 200, { ec: 200, em: '' })
+      }
+      const [existing] = await conn.query('SELECT status FROM recharge_orders WHERE order_id = ? LIMIT 1', [orderId])
+      if (existing.length && existing[0].status === 'paid') {
+        await conn.rollback()
+        return json(res, 200, { ec: 200, em: '' })
+      }
+      const totalAmount = Number(order.total_amount) || 0
+      const coins = Math.floor(totalAmount * COIN_PER_YUAN)
+      if (coins <= 0) {
+        await conn.rollback()
+        console.warn('[爱发电] 无法确定金币数:', JSON.stringify({ uid, orderId: outTradeNo, total_amount: totalAmount }))
+        return json(res, 200, { ec: 200, em: '' })
+      }
+      // 充值到账改为发邮件，由玩家在邮箱里领取，避免直接改写服务器存档
+      await conn.query(
+        'INSERT INTO mail (player_id, title, content, coins, rewards_json) VALUES (?, ?, ?, ?, ?)',
+        [String(uid), `充值到账 ¥${totalAmount}`, `您已成功充值 ¥${totalAmount}，获得 ${coins} 金币，请到邮箱查收！`, coins, JSON.stringify({ coins })]
+      )
+      await conn.query(
+        'INSERT INTO recharge_orders (order_id, player_id, amount, item, qty, status, paid_at) VALUES (?, ?, ?, ?, ?, "paid", NOW()) ON DUPLICATE KEY UPDATE status = "paid", paid_at = NOW()',
+        [orderId, String(uid), totalAmount, 'coins', coins]
+      )
+      await conn.commit()
+      console.log(`[爱发电] 玩家 ${uid} 充值 ¥${totalAmount} → ${coins} 金币（订单 ${outTradeNo}），已发邮件`)
       return json(res, 200, { ec: 200, em: '' })
+    } catch (e) {
+      await conn.rollback()
+      throw e
+    } finally {
+      conn.release()
     }
-    const totalAmount = Number(order.total_amount) || 0
-    const coins = Math.floor(totalAmount * COIN_PER_YUAN)
-    if (coins <= 0) {
-      console.warn('[爱发电] 无法确定金币数:', JSON.stringify({ uid, orderId: outTradeNo, total_amount: totalAmount }))
-      return json(res, 200, { ec: 200, em: '' })
-    }
-    // 直接写入玩家存档金币（玩家下次同步/下载存档即可看到）
-    const save = await readSave(String(uid))
-    if (save) {
-      setCoins(save, getCoins(save) + coins)
-      await writeSave(String(uid), save)
-    }
-    await pool.query(
-      'INSERT INTO recharge_orders (order_id, player_id, amount, item, qty, status, paid_at) VALUES (?, ?, ?, ?, ?, "paid", NOW()) ON DUPLICATE KEY UPDATE status = "paid", paid_at = NOW()',
-      [orderId, String(uid), totalAmount, 'coins', coins]
-    )
-    console.log(`[爱发电] 玩家 ${uid} 充值 ¥${totalAmount} → ${coins} 金币（订单 ${outTradeNo}）`)
-    return json(res, 200, { ec: 200, em: '' })
   } catch (e) {
     console.error('[爱发电] webhook 处理失败:', e)
     return json(res, 200, { ec: 200, em: '' })
