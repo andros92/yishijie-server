@@ -43,6 +43,9 @@ WantedBy=multi-user.target
 - `POST /recharge/order` 创建充值订单
 - `POST /recharge/callback` 支付回调（校验 XS-Sign）
 - `POST /admin/mark-paid` 手动确认订单到账（测试用，需管理密钥）
+- `GET /payment/afdian-url` 获取爱发电商品链接（手机端跳转支付）
+- `POST /payment/afdian-webhook` 爱发电支付回调（HMAC-SHA256 验签，备注填 playerId，按 ¥1=10000 金币入存档）
+- `GET /payment/orders` 查询我的充值订单（到账状态）
 - `GET /mail/:playerId` 邮件列表（含 rewards 奖励对象）
 - `POST /mail/claim` 领取邮件（金币/物品/装备/宠物直接写入存档）
 - `POST /admin/mail/send` 发邮件，奖励结构 `{coins, items:{key:n}, gear:[], pets:[]}`

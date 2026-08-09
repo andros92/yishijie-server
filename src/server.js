@@ -23,6 +23,9 @@ const SECRET = process.env.YS_SECRET || 'change-this-secret'
 const COIN_PER_YUAN = Number(process.env.RECHARGE_COIN_PER_YUAN || 10000)
 const EXCHANGE_FEE_RATE = 0.10 // 平台手续费 10%
 const MAX_BODY = 2 * 1024 * 1024
+// ============ 爱发电（与垃圾佬/对决战2 同一套配置） ============
+const AFDIAN_URL = process.env.AFDIAN_URL || 'https://www.ifdian.net/item/6684be3293a211f1853d52540025c377'
+const AFDIAN_WEBHOOK_TOKEN = process.env.AFDIAN_WEBHOOK_TOKEN || 'pw3N5qWDUV9syFxhSJKufCeAdabrX7Bm'
 
 const pool = mysql.createPool({
   host: process.env.DB_HOST || '127.0.0.1',
@@ -37,7 +40,11 @@ const pool = mysql.createPool({
 
 const app = express()
 app.use(cors())
-app.use(express.json({ limit: MAX_BODY }))
+app.use(express.json({
+  limit: MAX_BODY,
+  // 保留原始请求体，用于爱发电 webhook HMAC-SHA256 验签
+  verify: (req, res, buf) => { req.rawBody = buf.toString('utf8') }
+}))
 
 function json(res, code, obj) {
   return res.status(code).json(obj)
@@ -69,6 +76,17 @@ function validFingerprint(fp) {
 
 function sign(str) {
   return crypto.createHmac('sha256', SECRET).update(String(str)).digest('hex')
+}
+
+// 爱发电 webhook 验签（与对决战2 economyService.verifyWebhookSignature 一致）
+function verifyAfdianSignature(rawBody, signature) {
+  if (!signature || !AFDIAN_WEBHOOK_TOKEN) return false
+  try {
+    const expected = crypto.createHmac('sha256', AFDIAN_WEBHOOK_TOKEN).update(String(rawBody)).digest('hex')
+    return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(String(signature)))
+  } catch (e) {
+    return false
+  }
 }
 
 async function findUserByFp(deviceFp, phoneFp) {
@@ -568,6 +586,87 @@ async function creditOrder(orderId) {
   }
   await pool.query('UPDATE recharge_orders SET status = "paid", paid_at = NOW() WHERE order_id = ?', [orderId])
 }
+
+// ============ 爱发电充值（参照垃圾佬/对决战2：备注填 playerId + webhook 发奖） ============
+app.get('/api/yishijie/payment/afdian-url', (req, res) => {
+  return json(res, 200, { success: true, afdianUrl: AFDIAN_URL })
+})
+
+app.get('/api/yishijie/payment/orders', async (req, res) => {
+  try {
+    const { playerId, deviceFingerprint, apiKey } = req.query
+    const user = await authUser(playerId, deviceFingerprint, apiKey)
+    if (!user) return json(res, 403, { error: '鉴权失败' })
+    const [rows] = await pool.query(
+      'SELECT order_id, amount, qty, status, created_at, paid_at FROM recharge_orders WHERE player_id = ? ORDER BY id DESC LIMIT 10',
+      [user.player_id]
+    )
+    return json(res, 200, { success: true, data: rows })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+app.post('/api/yishijie/payment/afdian-webhook', async (req, res) => {
+  try {
+    const rawBody = req.rawBody || ''
+    const signature = req.header('x-afdian-sign') || ''
+    if (signature) {
+      if (!rawBody || !verifyAfdianSignature(rawBody, signature)) {
+        console.warn('[爱发电] 签名验证失败，拒绝请求')
+        return json(res, 200, { ec: 200, em: '' })
+      }
+    } else {
+      console.warn('[爱发电] 未收到签名头，已放行（请尽快在爱发电后台配置 webhook token）')
+    }
+    const payload = req.body || {}
+    const data = payload.data
+    if (!data || data.type !== 'order' || !data.order) {
+      return json(res, 200, { ec: 200, em: '' })
+    }
+    const order = data.order
+    if (Number(order.status) !== 2) {
+      return json(res, 200, { ec: 200, em: '' })
+    }
+    const uid = Number(order.remark)
+    const outTradeNo = String(order.out_trade_no || '')
+    if (!Number.isFinite(uid) || !uid || !outTradeNo) {
+      console.warn('[爱发电] 无效订单数据（备注playerId/订单号）:', JSON.stringify({ uid, orderId: outTradeNo }))
+      return json(res, 200, { ec: 200, em: '' })
+    }
+    const [urows] = await pool.query('SELECT player_id FROM users WHERE player_id = ? LIMIT 1', [String(uid)])
+    if (!urows.length) {
+      console.warn('[爱发电] 玩家不存在，已忽略:', uid)
+      return json(res, 200, { ec: 200, em: '' })
+    }
+    const orderId = 'AF' + outTradeNo
+    const [existing] = await pool.query('SELECT status FROM recharge_orders WHERE order_id = ? LIMIT 1', [orderId])
+    if (existing.length && existing[0].status === 'paid') {
+      return json(res, 200, { ec: 200, em: '' })
+    }
+    const totalAmount = Number(order.total_amount) || 0
+    const coins = Math.floor(totalAmount * COIN_PER_YUAN)
+    if (coins <= 0) {
+      console.warn('[爱发电] 无法确定金币数:', JSON.stringify({ uid, orderId: outTradeNo, total_amount: totalAmount }))
+      return json(res, 200, { ec: 200, em: '' })
+    }
+    // 直接写入玩家存档金币（玩家下次同步/下载存档即可看到）
+    const save = await readSave(String(uid))
+    if (save) {
+      setCoins(save, getCoins(save) + coins)
+      await writeSave(String(uid), save)
+    }
+    await pool.query(
+      'INSERT INTO recharge_orders (order_id, player_id, amount, item, qty, status, paid_at) VALUES (?, ?, ?, ?, ?, "paid", NOW()) ON DUPLICATE KEY UPDATE status = "paid", paid_at = NOW()',
+      [orderId, String(uid), totalAmount, 'coins', coins]
+    )
+    console.log(`[爱发电] 玩家 ${uid} 充值 ¥${totalAmount} → ${coins} 金币（订单 ${outTradeNo}）`)
+    return json(res, 200, { ec: 200, em: '' })
+  } catch (e) {
+    console.error('[爱发电] webhook 处理失败:', e)
+    return json(res, 200, { ec: 200, em: '' })
+  }
+})
 
 // ============ 公告 / 版本 / 健康 ============
 app.get('/api/yishijie/announcements', async (req, res) => {
