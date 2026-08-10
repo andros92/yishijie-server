@@ -461,6 +461,12 @@ app.post('/api/yishijie/saves/:playerId', async (req, res) => {
     if (clientTime > 0 && Math.abs(Date.now() - clientTime) > 3600000) {
       return json(res, 403, { error: '时间校验失败，请检查设备时间设置', serverTime: Date.now(), deviceTime: clientTime })
     }
+    // 防旧档覆盖备份：提交的存档版本低于服务器备份 → 拒绝（可能用来刷物品）
+    const curSv = Number(data.sv) || 0
+    const prevBackup = await readSave(user.player_id)
+    if (prevBackup && (Number(prevBackup.sv) || 0) > curSv) {
+      return json(res, 409, { error: '存档过期，请先从服务器恢复最新存档后再上传' })
+    }
     await writeSave(user.player_id, data)
     return json(res, 200, { success: true })
   } catch (e) {
@@ -480,17 +486,22 @@ function requireCompanionChannel(req, res) {
 app.post('/api/yishijie/exchange/list', async (req, res) => {
   try {
     if (!requireCompanionChannel(req, res)) return
-    const { playerId, deviceFingerprint, apiKey, key, name, img, qty, price, quality, dur, maxDur, category, pet, uid, petCaseId } = req.body || {}
+    const { playerId, deviceFingerprint, apiKey, key, name, img, qty, price, quality, dur, maxDur, category, pet, uid, petCaseId, save } = req.body || {}
     const user = await authUser(playerId, deviceFingerprint, apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
     if (!key || !(qty > 0) || !(price > 0)) return json(res, 400, { error: '参数不完整' })
-    // 串行化本玩家的存档读写，防止并发挂单重复扣同一批物品
+    // 以手环提交的存档为准（服务器存档只是备份），串行化防止并发重复扣物
     return withPlayerLock(user.player_id, async () => {
-    const save = await readSave(user.player_id)
-    if (!save) return json(res, 400, { error: '没有存档' })
+    const save = cloneSave(save)
+    if (!save || !save.bag) return json(res, 400, { error: '手环存档缺失或不完整' })
+    const stale = await ensureFreshSave(user.player_id, save)
+    if (stale) return json(res, 409, { error: stale.error })
+    save.sv = (Number(save.sv) || 0) + 1
     if (category === 'pet') {
       // 宠物挂单：只能卖装在宠物栏（宠物栏物品）里的宠物，从 survival.pet_cases 移除
       if (!petCaseId) return json(res, 400, { error: '宠物必须装在宠物栏里才能出售' })
+      const [dupPc] = await pool.query('SELECT id FROM exchange_listings WHERE item_uid = ? AND status <> "cancelled" LIMIT 1', [petCaseId])
+      if (dupPc.length) return json(res, 400, { error: '该宠物已在挂单中，不能重复上架' })
       if (!save.pet_cases || !save.pet_cases.list) save.pet_cases = { list: [] }
       const cases = save.pet_cases.list || []
       const ci = cases.findIndex(c => c && c.id === petCaseId)
@@ -504,7 +515,7 @@ app.post('/api/yishijie/exchange/list', async (req, res) => {
         'INSERT INTO exchange_listings (seller_id, seller_name, item_key, item_name, item_uid, category, pet_json, item_img, qty, price, quality, affix_json, gem, dur, max_dur, broken) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         [user.player_id, user.player_name, p.key, name || p.name || p.key, pc.id || petCaseId, 'pet', JSON.stringify(p), img || '', 1, price, '', null, '', 0, 0, 0]
       )
-      return json(res, 200, { success: true, listingId: r.insertId })
+      return json(res, 200, { success: true, listingId: r.insertId, save })
     }
     const isGear = category === 'gear' || !!(quality || dur || maxDur)
     const listing = {
@@ -530,6 +541,8 @@ app.post('/api/yishijie/exchange/list', async (req, res) => {
       }
       if (!inst) return json(res, 400, { error: '背包里没有这件装备' })
       if (!inst.uid) inst.uid = 'it_' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 6)
+      const [dupGear] = await pool.query('SELECT id FROM exchange_listings WHERE item_uid = ? AND status <> "cancelled" LIMIT 1', [inst.uid])
+      if (dupGear.length) return json(res, 400, { error: '该装备已在挂单中，不能重复上架' })
       list.splice(idx, 1)
       if (!list.length && save.gear) delete save.gear[key]
       listing.quality = inst.quality || ''
@@ -549,7 +562,7 @@ app.post('/api/yishijie/exchange/list', async (req, res) => {
       'INSERT INTO exchange_listings (seller_id, seller_name, item_key, item_name, item_uid, category, item_img, qty, price, quality, affix_json, gem, dur, max_dur, broken) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [user.player_id, user.player_name, listing.item_key, listing.item_name, listing.item_uid || '', listing.category, listing.item_img, listing.qty, price, listing.quality, listing.affix_json, listing.gem, listing.dur, listing.max_dur, listing.broken]
     )
-    return json(res, 200, { success: true, listingId: r.insertId })
+    return json(res, 200, { success: true, listingId: r.insertId, save })
     })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
@@ -604,7 +617,7 @@ app.get('/api/yishijie/exchange/listings', async (req, res) => {
 app.post('/api/yishijie/exchange/buy', async (req, res) => {
   if (!requireCompanionChannel(req, res)) return
   try {
-    const { listingId, buyerId, deviceFingerprint, apiKey } = req.body || {}
+    const { listingId, buyerId, deviceFingerprint, apiKey, save } = req.body || {}
     const buyer = await authUser(buyerId, deviceFingerprint, apiKey)
     if (!buyer) return json(res, 403, { error: '鉴权失败' })
     const [pre] = await pool.query('SELECT seller_id FROM exchange_listings WHERE id = ? AND status = "on" LIMIT 1', [listingId])
@@ -627,15 +640,26 @@ app.post('/api/yishijie/exchange/buy', async (req, res) => {
           await conn.rollback()
           return json(res, 404, { error: '该挂单不存在或已售出' })
         }
-        const buyerSave = await readSave(buyer.player_id)
-        if (!buyerSave || getCoins(buyerSave) < listing.price) {
+        // 以手环提交的存档为准：金币直接扣在这份存档上，服务器只留备份
+        const buyerSave = cloneSave(save)
+        if (!buyerSave) {
+          await conn.rollback()
+          return json(res, 400, { error: '手环存档缺失或不完整' })
+        }
+        const stale = await ensureFreshSave(buyer.player_id, buyerSave)
+        if (stale) {
+          await conn.rollback()
+          return json(res, 409, { error: stale.error })
+        }
+        if (getCoins(buyerSave) < listing.price) {
           await conn.rollback()
           return json(res, 400, { error: '金币不足' })
         }
+        buyerSave.sv = (Number(buyerSave.sv) || 0) + 1
         const fee = Math.floor(listing.price * EXCHANGE_FEE_RATE)
-        // 买家扣金币（立即入账）
+        // 买家扣金币（直接改在手环存档上，返回给手环落盘）
         setCoins(buyerSave, getCoins(buyerSave) - listing.price)
-        await writeSave(buyer.player_id, buyerSave)
+        await writeSave(buyer.player_id, buyerSave) // 服务器留备份（防刷）
         // 买家：物品/宠物一律通过邮件发放（不直接写存档，防止被旧档覆盖/刷单）
         const buyerMailRewards = {}
         if (listing.category === 'pet') {
@@ -680,7 +704,7 @@ app.post('/api/yishijie/exchange/buy', async (req, res) => {
           [listing.id, listing.item_key, listing.item_name, listing.item_uid || '', listing.qty, listing.price, fee, listing.seller_id, buyer.player_id]
         )
         await conn.commit()
-        return json(res, 200, { success: true, fee })
+        return json(res, 200, { success: true, fee, save: buyerSave })
       } catch (e) {
         await conn.rollback()
         throw e
@@ -696,7 +720,7 @@ app.post('/api/yishijie/exchange/buy', async (req, res) => {
 app.post('/api/yishijie/exchange/cancel', async (req, res) => {
   try {
     if (!requireCompanionChannel(req, res)) return
-    const { listingId, playerId, deviceFingerprint, apiKey } = req.body || {}
+    const { listingId, playerId, deviceFingerprint, apiKey, save } = req.body || {}
     const user = await authUser(playerId, deviceFingerprint, apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
     // 撤单加行锁：防止与并发购买竞态导致“已售出仍退款”（物品+金币双份）
@@ -714,11 +738,18 @@ app.post('/api/yishijie/exchange/cancel', async (req, res) => {
           await conn.rollback()
           return json(res, 403, { error: '只能撤自己的单' })
         }
-        const save = await readSave(user.player_id)
-        if (!save) {
+        // 以手环提交的存档为准：物品直接退回这份存档
+        const save = cloneSave(save)
+        if (!save || !save.bag) {
           await conn.rollback()
-          return json(res, 400, { error: '没有存档' })
+          return json(res, 400, { error: '手环存档缺失或不完整' })
         }
+        const stale = await ensureFreshSave(user.player_id, save)
+        if (stale) {
+          await conn.rollback()
+          return json(res, 409, { error: stale.error })
+        }
+        save.sv = (Number(save.sv) || 0) + 1
         if (listing.category === 'pet') {
           const p = parseJsonSafe(listing.pet_json, null)
           if (!p || !p.key) {
@@ -743,7 +774,7 @@ app.post('/api/yishijie/exchange/cancel', async (req, res) => {
         await writeSave(user.player_id, save)
         await conn.query('UPDATE exchange_listings SET status = "cancelled" WHERE id = ?', [listing.id])
         await conn.commit()
-        return json(res, 200, { success: true })
+        return json(res, 200, { success: true, save })
       } catch (e) {
         await conn.rollback()
         throw e
@@ -958,7 +989,7 @@ app.get('/api/yishijie/mail/:playerId', async (req, res) => {
 
 app.post('/api/yishijie/mail/claim', async (req, res) => {
   try {
-    const { playerId, deviceFingerprint, apiKey, mailId } = req.body || {}
+    const { playerId, deviceFingerprint, apiKey, mailId, save } = req.body || {}
     const user = await authUser(playerId, deviceFingerprint, apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
     // 行锁 + 玩家写锁：防止并发领取同一封邮件导致奖励重复发放
@@ -976,20 +1007,29 @@ app.post('/api/yishijie/mail/claim', async (req, res) => {
           await conn.rollback()
           return json(res, 200, { success: true, already: true })
         }
-        const save = await readSave(user.player_id)
-        let applied = { coins: 0, items: {}, gear: 0, pets: 0 }
-        if (save) {
-          const rewards = parseJsonSafe(mail.rewards_json, { coins: mail.coins || 0 })
-          applied = applyRewardsToSave(save, rewards)
-          await writeSave(user.player_id, save)
+        // 以手环提交的存档为准：奖励直接加在这份存档上，服务器只留备份
+        const save = cloneSave(save)
+        if (!save) {
+          await conn.rollback()
+          return json(res, 400, { error: '手环存档缺失或不完整' })
         }
+        const stale = await ensureFreshSave(user.player_id, save)
+        if (stale) {
+          await conn.rollback()
+          return json(res, 409, { error: stale.error })
+        }
+        save.sv = (Number(save.sv) || 0) + 1
+        let applied = { coins: 0, items: {}, gear: 0, pets: 0 }
+        const rewards = parseJsonSafe(mail.rewards_json, { coins: mail.coins || 0 })
+        applied = applyRewardsToSave(save, rewards)
+        await writeSave(user.player_id, save)
         const [up] = await conn.query('UPDATE mail SET claimed = 1 WHERE id = ? AND claimed = 0', [mail.id])
         if (!up.affectedRows) {
           await conn.rollback()
           return json(res, 200, { success: true, already: true })
         }
         await conn.commit()
-        return json(res, 200, { success: true, coins: applied.coins, applied })
+        return json(res, 200, { success: true, coins: applied.coins, applied, save })
       } catch (e) {
         await conn.rollback()
         throw e
@@ -1822,6 +1862,27 @@ async function initSchema() {
   } catch (e) {
     console.error('初始化 pvp_match_logs 表失败:', e.message)
   }
+}
+
+// 深拷贝手环提交的存档（服务器不得直接修改请求对象）
+function cloneSave(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  try {
+    return JSON.parse(JSON.stringify(raw))
+  } catch (e) {
+    return null
+  }
+}
+
+// 存档版本防回滚：提交的存档 sv 小于服务器备份 → 说明是旧档（可能用来刷物品）
+async function ensureFreshSave(playerId, save) {
+  const curSv = Number(save && save.sv) || 0
+  const backup = await readSave(playerId)
+  const backupSv = backup ? (Number(backup.sv) || 0) : 0
+  if (backupSv > curSv) {
+    return { error: '存档过期，请先同步最新存档后再操作' }
+  }
+  return null
 }
 
 initSchema().then(() => {
