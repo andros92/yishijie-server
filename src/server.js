@@ -598,7 +598,8 @@ app.get('/api/yishijie/exchange/listings', async (req, res) => {
     const size = Math.min(50, Math.max(1, parseInt(req.query.size || '10', 10)))
     const offset = (page - 1) * size
     const cat = req.query.category || 'all'
-    const mine = req.query.mine === '1'
+    // 手机端 Retrofit 会把布尔 mine 序列化成 true，这里同时兼容 1 / true
+    const mine = req.query.mine === '1' || req.query.mine === 'true'
     const keyword = String(req.query.keyword || '').trim()
     let sql = 'SELECT * FROM ysj_exchange_listings'
     const params = []
@@ -608,6 +609,7 @@ app.get('/api/yishijie/exchange/listings', async (req, res) => {
       if (!user) return json(res, 403, { error: '鉴权失败' })
       conds.push('seller_id = ?')
       params.push(user.player_id)
+      conds.push('status = "on"')
     } else {
       conds.push('status = "on"')
     }
