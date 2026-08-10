@@ -7,6 +7,10 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+// PVP 实时对战复用与手环一致的数值模块（纯数据/公式，无手环依赖）
+import { classStats, defaultClassData, dodgeFromAgi, skillLevel, skillMpCost, skillDmgMul, skillHealMul, SKILL_DEFS, CLASS_DEFS } from './common/classes.js'
+import { equipStats, emptyEquip } from './common/itemData.js'
+import { parsePets, getActivePet, petAtkOf } from './common/pets.js'
 
 // 手动加载 .env（不额外依赖）
 const ENV_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '.env')
@@ -1566,6 +1570,602 @@ app.post('/api/yishijie/pvp/room/fight', async (req, res) => {
       [result.winner, result.log.join('\n'), code]
     )
     return json(res, 200, { success: true, winner: result.winner, aWin: result.aWin, log: result.log })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+// ============ PVP 实时对战（手机端操控，服务端权威结算，防止客户端改包刷胜率） ============
+const pvpSessions = new Map()
+const PVPS_TTL = 15 * 60 * 1000
+
+function pvpKey(a, d) {
+  return String(a) + ':' + String(d)
+}
+
+function pvpBuildUnit(save, name) {
+  const cls = save && save.class ? save.class : null
+  const st = save && save.stats ? save.stats : null
+  const eq = save && save.equip ? save.equip : null
+  const lv = st && Number(st.lv) > 0 ? Number(st.lv) : 1
+  const es = equipStats(eq || emptyEquip())
+  const cs = classStats(cls || defaultClassData(), lv, es)
+  const passives = (cls && cls.passiveEq) || []
+  const pLv = (cls && cls.passiveLv) || {}
+  let maxHp = cs.maxHp
+  if (passives.indexOf('vitality') >= 0) maxHp = Math.round(maxHp * (1 + (pLv['vitality'] || 1) * 0.01))
+  const c = cs.cls || null
+  const isMage = !!(c && c.key === 'mage')
+  const learned = (cls && cls.skills) ? cls.skills : []
+  const equipped = (cls && cls.equipped) ? cls.equipped : []
+  return {
+    name,
+    lv,
+    maxHp,
+    hp: maxHp,
+    maxMp: cs.maxMp,
+    mp: cs.maxMp,
+    baseAtk: isMage ? 0 : (cs.atk - Math.round(((cs.weaponMin || 0) + (cs.weaponMax || 0)) / 2)),
+    wMin: cs.weaponMin || 0,
+    wMax: cs.weaponMax || 0,
+    baseMagic: (cs.magic || 0) - Math.round(((cs.weaponMagMin || 0) + (cs.weaponMagMax || 0)) / 2),
+    mMin: cs.weaponMagMin || 0,
+    mMax: cs.weaponMagMax || 0,
+    magic: cs.magic || 0,
+    def: cs.def,
+    resist: Math.min(40, cs.resist || 0),
+    crit: cs.crit || 0,
+    agi: cs.agi || 0,
+    dodge: Math.min(25, dodgeFromAgi(cs.agi || 0) + (es.dodge || 0)),
+    lifesteal: (es.lifesteal || 0) + (cs.lifesteal || 0),
+    regenPct: cs.regenPct || 0,
+    counterChance: cs.counterChance || 0,
+    rageGain: cs.rageGain || 15,
+    armorPen: es.armorPen || 0,
+    manaRegen: es.manaRegen || 0,
+    ignoreDef: isMage,
+    isWarrior: !!(c && c.key === 'warrior'),
+    isKnight: !!(c && c.key === 'knight'),
+    isPriest: !!(c && c.key === 'priest'),
+    isMage,
+    clsData: cls || defaultClassData(),
+    skills: (equipped && equipped.length) ? equipped.slice() : learned.slice(),
+    rage: 0,
+    charge: 0,
+    shield: 0,
+    shieldTurns: 0,
+    defBuff: 1,
+    defTurns: 0,
+    dmgRed: 0,
+    dmgRedTurns: 0,
+    counterBuff: 0,
+    counterTurns: 0,
+    atkDown: 0,
+    atkTurns: 0,
+    burnPct: 0,
+    burnTurns: 0,
+    poisonPct: 0,
+    poisonTurns: 0
+  }
+}
+
+// 宠物通用技能池（与手环打怪的宠物技能口径接近，轻量实现）
+const PVPS_PET_POOL = [
+  { name: '攻击', mult: 1 },
+  { name: '重击', mult: 1.3 },
+  { name: '撕咬', mult: 1.2, lifesteal: 0.3 },
+  { name: '治愈', mult: 0.8, healPct: 5 },
+  { name: '毒牙', mult: 0.9, dotPct: 5, dotTurns: 2 }
+]
+
+function pvpBuildPet(petsSave) {
+  let list = []
+  let active = ''
+  if (petsSave && typeof petsSave === 'object') {
+    list = petsSave.list || []
+    active = petsSave.active || ''
+  }
+  let p = null
+  for (const it of list) {
+    if (it && it.key === active) { p = it; break }
+  }
+  if (!p || !p.key) return null
+  return {
+    name: p.name || p.key,
+    lv: Number(p.lv) || 1,
+    atk: petAtkOf(p),
+    pool: PVPS_PET_POOL
+  }
+}
+
+function pvpDealDamage(t, raw, log) {
+  let mult = 1
+  if (t.dmgRed > 0) mult *= (1 - t.dmgRed)
+  if (t.resist > 0) mult *= (100 - t.resist) / 100
+  let dmg = Math.max(1, Math.round(raw * mult))
+  if (t.shield > 0) {
+    const absorb = Math.min(t.shield, dmg)
+    t.shield -= absorb
+    dmg -= absorb
+    log.push(t.name + '护盾吸收了' + absorb + '伤害')
+  }
+  dmg = Math.max(0, dmg)
+  t.hp = Math.max(0, t.hp - dmg)
+  return dmg
+}
+
+function pvpRageBonus(u) {
+  if (!u.isWarrior) return 1
+  return 1 + Math.floor(u.rage / 10) * ((CLASS_DEFS.warrior && CLASS_DEFS.warrior.rageDmg) || 2) / 100
+}
+
+function pvpAttack(atk, def, who, log) {
+  const wAtk = atk.wMax > 0 ? (atk.wMin + Math.floor(Math.random() * (atk.wMax - atk.wMin + 1))) : 0
+  const magRoll = atk.mMax > 0 ? (atk.mMin + Math.floor(Math.random() * (atk.mMax - atk.mMin + 1))) : 0
+  let base = atk.isMage ? (atk.baseMagic + magRoll) : (atk.baseAtk + wAtk)
+  if (atk.atkDown > 0) base = Math.round(base * (1 - atk.atkDown))
+  const defV = Math.round(def.def * 0.75 * (1 - atk.armorPen / 100))
+  let dmg = atk.ignoreDef ? base : Math.max(1, base - defV)
+  const dodged = dmg > 0 && def.dodge > 0 && Math.random() * 100 < def.dodge
+  if (dodged) dmg = 0
+  if (atk.isWarrior && dmg > 0) dmg = Math.round(dmg * pvpRageBonus(atk))
+  let crit = false
+  if (!dodged && dmg > 0 && atk.crit > 0 && Math.random() * 100 < atk.crit) {
+    dmg = Math.round(dmg * 1.5)
+    crit = true
+  }
+  let line
+  if (dodged) {
+    line = who + '的攻击被' + def.name + '闪避了'
+  } else {
+    const dealt = pvpDealDamage(def, dmg, log)
+    line = who + '发动攻击，造成' + dealt + '伤害' + (crit ? '，暴击！' : '')
+    if (atk.lifesteal > 0 && dealt > 0) {
+      const ls = Math.max(1, Math.round(dealt * atk.lifesteal / 100))
+      atk.hp = Math.min(atk.maxHp, atk.hp + ls)
+      line += '，吸血回复' + ls
+    }
+  }
+  const mpBack = Math.round(atk.maxMp * (5 + atk.manaRegen) / 100)
+  if (mpBack > 0) {
+    atk.mp = Math.min(atk.maxMp, atk.mp + mpBack)
+    line += '，恢复' + mpBack + '蓝量'
+  }
+  if (atk.isWarrior) {
+    atk.rage = Math.min(100, atk.rage + atk.rageGain)
+    line += '，怒气+' + atk.rageGain
+  }
+  if (atk.isMage) {
+    atk.charge = Math.min(5, atk.charge + 1)
+    line += '，充能' + atk.charge + '/5'
+  }
+  log.push(line)
+}
+
+function pvpUseSkill(atk, def, key, who, log) {
+  const sk = SKILL_DEFS[key]
+  if (!sk) { log.push(who + '的技能失效'); return }
+  const slv = skillLevel(atk.clsData, key)
+  const rageBefore = atk.rage
+  let extra = ''
+  if (sk.manaBurn) {
+    const cur = atk.mp
+    atk.mp = Math.max(0, Math.round(cur * (1 - (sk.manaBurn || 0.6))))
+  } else {
+    atk.mp = Math.max(0, atk.mp - skillMpCost(sk, slv))
+  }
+  let mult = skillDmgMul(sk, slv)
+  if (sk.rageAll && sk.dmg) mult = mult * (1 + Math.floor(rageBefore / 10) * (sk.rageMult || 0.1))
+  const wAtk = atk.wMax > 0 ? (atk.wMin + Math.floor(Math.random() * (atk.wMax - atk.wMin + 1))) : 0
+  const magRoll = atk.mMax > 0 ? (atk.mMin + Math.floor(Math.random() * (atk.mMax - atk.mMin + 1))) : 0
+  let baseDmg = sk.dmg ? Math.max(1, Math.round((atk.isMage ? (atk.baseMagic + magRoll) : (atk.baseAtk + wAtk)) * mult)) : 0
+  if (sk.manaBurn && baseDmg > 0) baseDmg += Math.round(atk.mp * (sk.manaBonus || 0.3))
+  const defV = Math.round(def.def * 0.75 * (1 - atk.armorPen / 100))
+  let dmg = atk.ignoreDef ? baseDmg : Math.max(1, baseDmg - defV)
+  const dodged = dmg > 0 && def.dodge > 0 && Math.random() * 100 < def.dodge
+  if (dodged) dmg = 0
+  if (dmg > 0 && def.burnTurns > 0 && (key === 'm_thunder' || key === 'm_meteor')) {
+    dmg = Math.round(dmg * 1.5)
+    extra += '，引燃爆发'
+  }
+  if (atk.isWarrior && dmg > 0) dmg = Math.round(dmg * pvpRageBonus(atk))
+  if (atk.isMage && dmg > 0) {
+    dmg = Math.round(dmg * (1 + atk.charge * ((CLASS_DEFS.mage && CLASS_DEFS.mage.chargeDmg) || 15) / 100))
+    atk.charge = Math.min(5, atk.charge + 1)
+    extra += '，充能' + atk.charge + '/5'
+  }
+  let crit = false
+  if (!dodged && dmg > 0 && atk.crit > 0 && Math.random() * 100 < atk.crit) {
+    dmg = Math.round(dmg * 1.5)
+    crit = true
+  }
+  let line
+  if (dodged) {
+    line = who + '使用' + sk.name + '，但被' + def.name + '闪避了'
+  } else {
+    line = who + '使用' + sk.name
+    if (dmg > 0) {
+      const dealt = pvpDealDamage(def, dmg, log)
+      line += '，造成' + dealt + '伤害' + (crit ? '，暴击！' : '')
+      if (atk.lifesteal > 0) {
+        const ls = Math.max(1, Math.round(dealt * atk.lifesteal / 100))
+        atk.hp = Math.min(atk.maxHp, atk.hp + ls)
+        line += '，吸血回复' + ls
+      }
+    }
+  }
+  if (sk.heal) {
+    const heal = Math.max(1, Math.round(atk.maxHp * skillHealMul(sk.heal, slv)))
+    atk.hp = Math.min(atk.maxHp, atk.hp + heal)
+    line += '，恢复' + heal + '生命'
+  }
+  if (sk.defUp) {
+    def.defBuff = sk.defUp
+    def.defTurns = sk.defTurns || 2
+    line += '，防御大幅提升'
+  }
+  if (sk.monAtkDown) {
+    def.atkDown = sk.monAtkDown
+    def.atkTurns = sk.monAtkTurns || 2
+    line += '，' + def.name + '攻击减半'
+  }
+  if (sk.burn) {
+    def.burnPct = sk.burn.dmg || 0.2
+    def.burnTurns = sk.burn.turns || 2
+    line += '，点燃目标'
+  }
+  if (sk.hpCost) {
+    const hpLoss = Math.max(1, Math.round(atk.hp * (sk.hpCost || 0.15)))
+    atk.hp = Math.max(1, atk.hp - hpLoss)
+    line += '，消耗' + hpLoss + '生命'
+  }
+  if (sk.shield) {
+    atk.shield = Math.round(atk.def * 2)
+    atk.shieldTurns = sk.shieldTurns || 2
+    line += '，获得护盾' + atk.shield
+  }
+  if (sk.dmgRed) {
+    atk.dmgRed = sk.dmgRed
+    atk.dmgRedTurns = sk.dmgRedTurns || 2
+    line += '，受到的伤害降低'
+  }
+  if (sk.counterBuff) {
+    atk.counterBuff = sk.counterBuff
+    atk.counterTurns = sk.counterTurns || 3
+    line += '，反击概率提升'
+  }
+  if (sk.rageAll) {
+    if (sk.rageHeal) {
+      const rh = Math.max(1, Math.round(atk.maxHp * Math.floor(rageBefore / 10) * (sk.rageHeal || 4) / 100))
+      atk.hp = Math.min(atk.maxHp, atk.hp + rh)
+      line += '，怒气化为生命恢复' + rh
+    } else if (sk.dmg) {
+      line += '（消耗' + rageBefore + '怒气）'
+    }
+    atk.rage = 0
+  } else if (sk.rage) {
+    atk.rage = Math.max(0, Math.min(100, atk.rage + sk.rage))
+  }
+  log.push(line + extra)
+}
+
+function pvpCounter(attacker, defender, who, log) {
+  if (!defender.isKnight || attacker.hp <= 0 || defender.hp <= 0) return
+  const chance = defender.counterChance + (defender.counterBuff || 0)
+  if (chance <= 0 || Math.random() * 100 >= chance) return
+  const dmg = Math.max(1, Math.round(defender.baseAtk * ((CLASS_DEFS.knight && CLASS_DEFS.knight.counterDmg) || 0.5)))
+  const dealt = pvpDealDamage(attacker, dmg, log)
+  log.push(who + '触发反击，造成' + dealt + '伤害')
+}
+
+function pvpPetAct(pet, target, who, owner, log) {
+  if (!pet || target.hp <= 0) return
+  const sk = pet.pool[Math.floor(Math.random() * pet.pool.length)]
+  const lvMult = 1 + (pet.lv - 1) * 0.01
+  const base = sk.ignoreDef ? pet.atk : Math.max(1, pet.atk - Math.round(target.def * 0.5))
+  let dmg = Math.max(1, Math.round(base * (sk.mult || 1) * lvMult))
+  let line = who + '「' + sk.name + '」'
+  let dealt = 0
+  if (target.dodge > 0 && Math.random() * 100 < target.dodge) {
+    line += '，被闪避了'
+  } else {
+    dealt = pvpDealDamage(target, dmg, log)
+    line += '，造成' + dealt + '伤害'
+  }
+  if (sk.hitTwice && dealt > 0) {
+    const second = Math.max(1, Math.round(dealt * 0.5))
+    pvpDealDamage(target, second, log)
+    line += '，追加' + second + '伤害'
+  }
+  if (sk.healPct && owner.hp < owner.maxHp && owner.hp > 0) {
+    const h = Math.max(1, Math.round(owner.maxHp * sk.healPct / 100))
+    owner.hp = Math.min(owner.maxHp, owner.hp + h)
+    line += '，恢复' + h + '生命'
+  }
+  if (sk.lifesteal && dealt > 0 && owner.hp < owner.maxHp && owner.hp > 0) {
+    const h = Math.max(1, Math.round(dealt * sk.lifesteal))
+    owner.hp = Math.min(owner.maxHp, owner.hp + h)
+    line += '，吸血恢复' + h
+  }
+  if (sk.monAtkDown && target.atkTurns <= 0) {
+    target.atkDown = sk.monAtkDown
+    target.atkTurns = sk.monAtkTurns || 2
+    line += '，攻击减半'
+  }
+  if (sk.dotPct && target.poisonTurns <= 0) {
+    target.poisonPct = sk.dotPct
+    target.poisonTurns = sk.dotTurns || 2
+    line += '，目标中毒了'
+  }
+  log.push(line)
+}
+
+function pvpTick(a, d, log) {
+  if (d.burnTurns > 0 && d.hp > 0) {
+    const bd = Math.max(1, Math.round((a.magic || 0) * (d.burnPct || 0.2)))
+    d.hp = Math.max(0, d.hp - bd)
+    d.burnTurns--
+    log.push(d.name + '受到灼烧' + bd + '伤害')
+  }
+  if (a.burnTurns > 0 && a.hp > 0) {
+    const pb = Math.max(1, Math.round((d.magic || 0) * (a.burnPct || 0.2)))
+    a.hp = Math.max(0, a.hp - pb)
+    a.burnTurns--
+    log.push(a.name + '受到灼烧' + pb + '伤害')
+  }
+  if (d.poisonTurns > 0 && d.hp > 0) {
+    const pd = Math.max(1, Math.round(d.maxHp * (d.poisonPct || 5) / 100))
+    d.hp = Math.max(0, d.hp - pd)
+    d.poisonTurns--
+    log.push(d.name + '中毒受到' + pd + '伤害')
+  }
+  if (a.poisonTurns > 0 && a.hp > 0) {
+    const pp = Math.max(1, Math.round(a.maxHp * (a.poisonPct || 5) / 100))
+    a.hp = Math.max(0, a.hp - pp)
+    a.poisonTurns--
+    log.push(a.name + '中毒受到' + pp + '伤害')
+  }
+  if (a.isPriest && a.hp > 0 && a.hp < a.maxHp) {
+    const r = Math.max(1, Math.round(a.maxHp * a.regenPct / 100))
+    a.hp = Math.min(a.maxHp, a.hp + r)
+    log.push(a.name + '圣光庇佑恢复' + r + '生命')
+  }
+  if (d.isPriest && d.hp > 0 && d.hp < d.maxHp) {
+    const r = Math.max(1, Math.round(d.maxHp * d.regenPct / 100))
+    d.hp = Math.min(d.maxHp, d.hp + r)
+    log.push(d.name + '圣光庇佑恢复' + r + '生命')
+  }
+  if (d.defTurns > 0 && --d.defTurns <= 0) d.defBuff = 1
+  if (d.atkTurns > 0 && --d.atkTurns <= 0) d.atkDown = 0
+  if (a.defTurns > 0 && --a.defTurns <= 0) a.defBuff = 1
+  if (a.atkTurns > 0 && --a.atkTurns <= 0) a.atkDown = 0
+  if (a.dmgRedTurns > 0 && --a.dmgRedTurns <= 0) a.dmgRed = 0
+  if (d.dmgRedTurns > 0 && --d.dmgRedTurns <= 0) d.dmgRed = 0
+  if (a.counterTurns > 0 && --a.counterTurns <= 0) a.counterBuff = 0
+  if (d.counterTurns > 0 && --d.counterTurns <= 0) d.counterBuff = 0
+  if (a.shieldTurns > 0 && --a.shieldTurns <= 0) a.shield = 0
+  if (d.shieldTurns > 0 && --d.shieldTurns <= 0) d.shield = 0
+}
+
+function pvpEnemyAct(s, log) {
+  const a = s.a
+  const d = s.d
+  let sk = null
+  let key = ''
+  const list = d.skills || []
+  if (d.isPriest && d.hp < d.maxHp * 0.6) {
+    for (const k of list) {
+      const s0 = SKILL_DEFS[k]
+      if (s0 && s0.heal && d.mp >= skillMpCost(s0, skillLevel(d.clsData, k))) { sk = s0; key = k; break }
+    }
+  }
+  if (!sk) {
+    let best = null
+    let bestKey = ''
+    for (const k of list) {
+      const sj = SKILL_DEFS[k]
+      if (!sj) continue
+      if (sj.manaBurn && d.mp < d.maxMp * 0.3) continue
+      const cost = sj.manaBurn ? 0 : skillMpCost(sj, skillLevel(d.clsData, k))
+      if (!sj.manaBurn && d.mp < cost) continue
+      if (sj.rageNeed && d.rage < sj.rageNeed) continue
+      if (sj.dmg && (!best || skillDmgMul(sj, skillLevel(d.clsData, k)) > skillDmgMul(best, skillLevel(d.clsData, bestKey)))) {
+        best = sj
+        bestKey = k
+      }
+    }
+    sk = best
+    key = bestKey
+  }
+  if (sk && key) pvpUseSkill(d, a, key, d.name, log)
+  else pvpAttack(d, a, d.name, log)
+  pvpCounter(a, d, a.name, log)
+  pvpPetAct(s.dPet, a, d.name + '的宠物', d, log)
+}
+
+function pvpBattleState(s) {
+  const pub = (u) => {
+    const skills = (u.skills || []).slice(0, 4).map((k) => {
+      const sk = SKILL_DEFS[k]
+      if (!sk) return { key: k, name: k, cost: '未知' }
+      let cost = ''
+      if (sk.manaBurn) cost = '耗60%蓝'
+      else if (sk.mp > 0) cost = 'MP ' + skillMpCost(sk, skillLevel(u.clsData, k))
+      if (sk.rageNeed) cost = (cost ? cost + ' ' : '') + '怒' + sk.rageNeed
+      if (sk.rageAll) cost = (cost ? cost + ' ' : '') + '全怒'
+      if (!cost) cost = '无消耗'
+      return { key: k, name: sk.name, cost }
+    })
+    return {
+      name: u.name,
+      lv: u.lv,
+      maxHp: u.maxHp, hp: u.hp,
+      maxMp: u.maxMp, mp: u.mp,
+      rage: u.rage, charge: u.charge,
+      shield: u.shield, defBuff: u.defBuff, dmgRed: u.dmgRed,
+      atkDown: u.atkDown, burnTurns: u.burnTurns, poisonTurns: u.poisonTurns,
+      counterBuff: u.counterBuff,
+      isWarrior: u.isWarrior, isMage: u.isMage,
+      skills,
+      pet: u.pet ? { name: u.pet.name, lv: u.pet.lv } : null
+    }
+  }
+  return {
+    attacker: pub(Object.assign(s.a, { pet: s.aPet })),
+    defender: pub(Object.assign(s.d, { pet: s.dPet })),
+    turn: s.turn,
+    log: s.log.slice(-6),
+    ended: !!s.ended,
+    win: s.win
+  }
+}
+
+// 结算：匹配次数 + Elo + 对战记录 + 回放日志（与 /pvp/match 口径一致）
+async function pvpSettleMatch(attackerId, defenderId, winFlag, log, res) {
+  const day = todayStr()
+  const used = await pvpDailyUsed(attackerId)
+  if (used >= 12) return json(res, 403, { error: '今日匹配战次数已用完（12次），明天再来吧' })
+  await pool.query(
+    'INSERT INTO ysj_pvp_daily (player_id, day, used) VALUES (?, ?, 1) ON DUPLICATE KEY UPDATE used = used + 1',
+    [attackerId, day]
+  )
+  const ra = await getRatingRow(attackerId)
+  const rd = await getRatingRow(defenderId)
+  const Ra = ratingOf(ra)
+  const Rd = ratingOf(rd)
+  const expectedA = 1 / (1 + Math.pow(10, (Rd - Ra) / 400))
+  const delta = Math.max(1, Math.round(32 * ((winFlag ? 1 : 0) - expectedA)))
+  const newRa = Math.max(0, Ra + delta)
+  const newRd = Math.max(0, Rd - delta)
+  await pool.query(
+    'INSERT INTO ysj_pvp_ratings (player_id, rating, wins, losses) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE rating = VALUES(rating), wins = wins + VALUES(wins), losses = losses + VALUES(losses)',
+    [attackerId, newRa, winFlag ? 1 : 0, winFlag ? 0 : 1]
+  )
+  await pool.query(
+    'INSERT INTO ysj_pvp_ratings (player_id, rating, wins, losses) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE rating = VALUES(rating), wins = wins + VALUES(wins), losses = losses + VALUES(losses)',
+    [defenderId, newRd, winFlag ? 0 : 1, winFlag ? 1 : 0]
+  )
+  const [mi] = await pool.query(
+    'INSERT INTO ysj_pvp_matches (attacker_id, defender_id, attacker_win, rating_delta) VALUES (?, ?, ?, ?)',
+    [attackerId, defenderId, winFlag ? 1 : 0, delta]
+  )
+  if (Array.isArray(log) && log.length) {
+    try {
+      await pool.query('INSERT INTO ysj_pvp_match_logs (match_id, log_json) VALUES (?, ?)', [mi.insertId, JSON.stringify(log)])
+    } catch (e) {}
+  }
+  return { rating: newRa, delta, dailyLeft: Math.max(0, 12 - (used + 1)) }
+}
+
+app.post('/api/yishijie/pvp/battle/start', async (req, res) => {
+  try {
+    const { playerId, deviceFingerprint, apiKey, targetId } = req.body || {}
+    const user = await authUser(playerId, deviceFingerprint, apiKey)
+    if (!user) return json(res, 403, { error: '鉴权失败' })
+    if (!targetId || targetId === user.player_id) return json(res, 400, { error: '目标无效' })
+    const [tu] = await pool.query('SELECT player_id, player_name FROM ysj_users WHERE player_id = ? LIMIT 1', [targetId])
+    if (!tu.length) return json(res, 404, { error: '目标玩家不存在' })
+    const used = await pvpDailyUsed(user.player_id)
+    if (used >= 12) return json(res, 403, { error: '今日匹配战次数已用完（12次），明天再来吧' })
+    const aSave = await readSave(user.player_id)
+    const dSave = await readSave(targetId)
+    if (!aSave || !dSave) return json(res, 400, { error: '双方存档缺失，请先同步存档' })
+    const key = pvpKey(user.player_id, targetId)
+    const s = {
+      aId: user.player_id,
+      dId: targetId,
+      aName: user.player_name || user.player_id,
+      dName: tu[0].player_name || targetId,
+      a: pvpBuildUnit(aSave, user.player_name || user.player_id),
+      d: pvpBuildUnit(dSave, tu[0].player_name || targetId),
+      aPet: pvpBuildPet(aSave.pets),
+      dPet: pvpBuildPet(dSave.pets),
+      turn: 1,
+      log: [],
+      ended: false,
+      win: null,
+      createdAt: Date.now()
+    }
+    pvpSessions.set(key, s)
+    s.log.push('遭遇了 ' + s.dName + '（Lv.' + s.d.lv + '）！你的宠物' + (s.aPet ? ('「' + s.aPet.name + '」随时待命') : '未出战'))
+    return json(res, 200, { success: true, battle: pvpBattleState(s), dailyLeft: Math.max(0, 12 - used) })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+app.post('/api/yishijie/pvp/battle/turn', async (req, res) => {
+  try {
+    const { playerId, deviceFingerprint, apiKey, targetId, action } = req.body || {}
+    const user = await authUser(playerId, deviceFingerprint, apiKey)
+    if (!user) return json(res, 403, { error: '鉴权失败' })
+    const key = pvpKey(user.player_id, targetId)
+    const s = pvpSessions.get(key)
+    if (!s) return json(res, 404, { error: '对局不存在或已过期，请重新匹配' })
+    if (Date.now() - s.createdAt > PVPS_TTL) {
+      pvpSessions.delete(key)
+      return json(res, 404, { error: '对局已超时，请重新匹配' })
+    }
+    if (s.ended) return json(res, 200, { success: true, battle: pvpBattleState(s), ended: true, win: s.win, settled: s.settled })
+    const a = s.a
+    const d = s.d
+    const log = []
+    const act = action || {}
+    if (act.type === 'flee') {
+      s.ended = true
+      s.win = false
+      log.push('你撤退了，本场对战失败')
+    } else if (act.type === 'skill') {
+      const key2 = String(act.skill || '')
+      const sk = SKILL_DEFS[key2]
+      if (!sk) return json(res, 400, { error: '技能无效' })
+      const cost = sk.manaBurn ? 0 : skillMpCost(sk, skillLevel(a.clsData, key2))
+      if (!sk.manaBurn && a.mp < cost) return json(res, 400, { error: '蓝量不足' })
+      if (sk.rageNeed && a.rage < sk.rageNeed) return json(res, 400, { error: '怒气不足' })
+      pvpUseSkill(a, d, key2, '你', log)
+      pvpCounter(d, a, d.name, log)
+    } else {
+      pvpAttack(a, d, '你', log)
+      pvpCounter(d, a, d.name, log)
+    }
+    if (d.hp > 0 && a.hp > 0) pvpPetAct(s.aPet, d, '你的宠物', a, log)
+    if (d.hp > 0 && a.hp > 0) pvpEnemyAct(s, log)
+    s.turn++
+    if (a.hp > 0 && d.hp > 0) pvpTick(a, d, log)
+    s.log = s.log.concat(log)
+    if (log.length > 40) s.log = s.log.slice(-120)
+    if (d.hp <= 0) {
+      s.ended = true
+      s.win = true
+      s.log.push('你击败了' + d.name + '！')
+    } else if (a.hp <= 0) {
+      s.ended = true
+      s.win = false
+      s.log.push('你被' + d.name + '击败了！')
+    } else if (s.turn >= 60) {
+      s.ended = true
+      s.win = false
+      s.log.push('战斗超过60回合，判定为失败')
+    }
+    let settled = null
+    if (s.ended && !s.settled) {
+      s.settled = true
+      settled = await pvpSettleMatch(user.player_id, targetId, s.win, s.log, res)
+      if (settled === undefined) {
+        pvpSessions.delete(key)
+        return
+      }
+      pvpSessions.delete(key)
+    }
+    return json(res, 200, {
+      success: true,
+      battle: pvpBattleState(s),
+      ended: s.ended,
+      win: s.win,
+      rating: settled ? settled.rating : null,
+      delta: settled ? settled.delta : null,
+      dailyLeft: settled ? settled.dailyLeft : null
+    })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
   }
