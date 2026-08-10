@@ -225,7 +225,8 @@ function applyRewardsToSave(save, rewards) {
         gem: g.gem || '',
         dur: typeof g.dur === 'number' ? g.dur : 0,
         maxDur: typeof g.maxDur === 'number' ? g.maxDur : 0,
-        broken: !!g.broken
+        broken: !!g.broken,
+        uid: g.uid || undefined
       })
       applied.gear++
     }
@@ -623,48 +624,58 @@ app.post('/api/yishijie/exchange/buy', async (req, res) => {
           await conn.rollback()
           return json(res, 404, { error: '该挂单不存在或已售出' })
         }
-        const sellerSave = await readSave(listing.seller_id)
         const buyerSave = await readSave(buyer.player_id)
         if (!buyerSave || getCoins(buyerSave) < listing.price) {
           await conn.rollback()
           return json(res, 400, { error: '金币不足' })
         }
         const fee = Math.floor(listing.price * EXCHANGE_FEE_RATE)
-        // 买家扣金币
+        // 买家扣金币（立即入账）
         setCoins(buyerSave, getCoins(buyerSave) - listing.price)
-        // 卖家收金币（扣手续费）
-        if (!sellerSave) sellerSave = { bag: { coin: 0 }, gear: {} }
-        setCoins(sellerSave, getCoins(sellerSave) + (listing.price - fee))
-        // 物品转给买家
+        await writeSave(buyer.player_id, buyerSave)
+        // 买家：物品/宠物一律通过邮件发放（不直接写存档，防止被旧档覆盖/刷单）
+        const buyerMailRewards = {}
         if (listing.category === 'pet') {
           const p = parseJsonSafe(listing.pet_json, null)
           if (!p || !p.key) {
             await conn.rollback()
             return json(res, 400, { error: '宠物数据异常' })
           }
-          // 买家收到的是一只装在宠物栏里的宠物（宠物栏物品占一格）
-          if (!buyerSave.pet_cases) buyerSave.pet_cases = { list: [] }
-          if (buyerSave.pet_cases.list.length >= 60) {
-            await conn.rollback()
-            return json(res, 400, { error: '宠物栏背包已满（最多60个）' })
-          }
-          buyerSave.pet_cases.list.push({
-            id: listing.item_uid || ('pc' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 6)),
-            pet: {
-              key: p.key, name: p.name || p.key, lv: Number(p.lv) || 1, exp: Number(p.exp) || 0,
-              boss: !!p.boss, elite: !!p.elite, id: p.id || undefined
-            }
-          })
+          buyerMailRewards.pets = [{
+            key: p.key, name: p.name || p.key, lv: Number(p.lv) || 1, exp: Number(p.exp) || 0,
+            boss: !!p.boss, elite: !!p.elite, id: p.id || undefined
+          }]
+        } else if (listing.category === 'gear') {
+          buyerMailRewards.gear = [{
+            key: listing.item_key,
+            quality: listing.quality || 'common',
+            affixes: parseJsonSafe(listing.affix_json, null) || [],
+            gem: listing.gem || '',
+            dur: listing.dur || 0,
+            maxDur: listing.max_dur || 0,
+            broken: !!listing.broken,
+            uid: listing.item_uid || ''
+          }]
         } else {
-          addItem(buyerSave, listing, listing.qty)
+          const it = {}
+          it[listing.item_key] = listing.qty
+          buyerMailRewards.items = it
         }
+        await conn.query(
+          'INSERT INTO mail (player_id, title, content, coins, rewards_json) VALUES (?, ?, ?, ?, ?)',
+          [buyer.player_id, '交易购买：' + listing.item_name, '你购买的「' + listing.item_name + '」已到货，请到邮箱领取。', 0, JSON.stringify(buyerMailRewards)]
+        )
+        // 卖家：扣除手续费后的金币通过邮件发放
+        const sellerIncome = listing.price - fee
+        await conn.query(
+          'INSERT INTO mail (player_id, title, content, coins, rewards_json) VALUES (?, ?, ?, ?, ?)',
+          [listing.seller_id, '交易收入：' + sellerIncome + ' 金币', '你上架的「' + listing.item_name + '」已售出，扣除 ' + fee + ' 金币手续费后入账，请到邮箱领取。', 0, JSON.stringify({ coins: sellerIncome })]
+        )
         await conn.query('UPDATE exchange_listings SET status = "sold" WHERE id = ?', [listing.id])
         await conn.query(
           'INSERT INTO exchange_trade_history (listing_id, item_key, item_name, item_uid, qty, price, fee, seller_id, buyer_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
           [listing.id, listing.item_key, listing.item_name, listing.item_uid || '', listing.qty, listing.price, fee, listing.seller_id, buyer.player_id]
         )
-        await writeSave(listing.seller_id, sellerSave)
-        await writeSave(buyer.player_id, buyerSave)
         await conn.commit()
         return json(res, 200, { success: true, fee })
       } catch (e) {
