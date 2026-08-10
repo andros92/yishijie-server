@@ -60,6 +60,11 @@ function hash(str) {
   return crypto.createHash('sha256').update(String(str)).digest('hex')
 }
 
+async function nextPlayerId() {
+  const [[{ maxId }]] = await pool.query("SELECT COALESCE(MAX(CAST(player_id AS UNSIGNED)), 10000000) AS maxId FROM ysj_users")
+  return String(maxId + 1)
+}
+
 function randomPlayerId() {
   return String(Math.floor(10000000 + Math.random() * 89999999))
 }
@@ -113,7 +118,7 @@ function requireAdmin(req, res) {
 
 async function checkBannedFingerprint(fp) {
   if (!fp) return false
-  const [rows] = await pool.query('SELECT * FROM banned_fingerprints WHERE fingerprint = ? LIMIT 1', [fp])
+  const [rows] = await pool.query('SELECT * FROM ysj_banned_fingerprints WHERE fingerprint = ? LIMIT 1', [fp])
   return rows.length ? rows[0] : null
 }
 
@@ -129,14 +134,12 @@ function verifyAfdianSignature(rawBody, signature) {
 }
 
 async function findUserByFp(deviceFp, phoneFp) {
-  // 手环即身份：只要设备指纹有效，就只按设备指纹找账号，
-  // 绝不用手机指纹兜底——否则换一个手环也会被认成第一个账号
-  if (validFingerprint(deviceFp)) {
-    const [rows] = await pool.query('SELECT * FROM users WHERE device_fingerprint = ? LIMIT 1', [deviceFp])
-    return rows.length ? rows[0] : null
+  if (deviceFp) {
+    const [rows] = await pool.query('SELECT * FROM ysj_users WHERE device_fingerprint = ? LIMIT 1', [deviceFp])
+    if (rows.length) return rows[0]
   }
   if (phoneFp) {
-    const [rows] = await pool.query('SELECT * FROM users WHERE phone_fingerprint = ? LIMIT 1', [phoneFp])
+    const [rows] = await pool.query('SELECT * FROM ysj_users WHERE phone_fingerprint = ? LIMIT 1', [phoneFp])
     if (rows.length) return rows[0]
   }
   return null
@@ -144,12 +147,12 @@ async function findUserByFp(deviceFp, phoneFp) {
 
 async function authUser(playerId, deviceFp, apiKey) {
   if (!playerId || !deviceFp || !apiKey) return null
-  const [rows] = await pool.query('SELECT * FROM users WHERE player_id = ? AND device_fingerprint = ? AND api_key = ? AND banned = 0 LIMIT 1', [playerId, deviceFp, apiKey])
+  const [rows] = await pool.query('SELECT * FROM ysj_users WHERE player_id = ? AND device_fingerprint = ? AND api_key = ? AND banned = 0 LIMIT 1', [playerId, deviceFp, apiKey])
   return rows.length ? rows[0] : null
 }
 
 async function readSave(playerId) {
-  const [rows] = await pool.query('SELECT data FROM saves WHERE player_id = ? LIMIT 1', [playerId])
+  const [rows] = await pool.query('SELECT data FROM ysj_saves WHERE player_id = ? LIMIT 1', [playerId])
   if (!rows.length) return null
   try {
     return JSON.parse(rows[0].data)
@@ -160,7 +163,7 @@ async function readSave(playerId) {
 
 async function writeSave(playerId, data) {
   await pool.query(
-    'INSERT INTO saves (player_id, data) VALUES (?, ?) ON DUPLICATE KEY UPDATE data = VALUES(data)',
+    'INSERT INTO ysj_saves (player_id, data) VALUES (?, ?) ON DUPLICATE KEY UPDATE data = VALUES(data)',
     [playerId, JSON.stringify(data)]
   )
 }
@@ -259,7 +262,7 @@ function ratingOf(row) {
 }
 
 async function getRatingRow(playerId) {
-  const [rows] = await pool.query('SELECT * FROM pvp_ratings WHERE player_id = ? LIMIT 1', [playerId])
+  const [rows] = await pool.query('SELECT * FROM ysj_pvp_ratings WHERE player_id = ? LIMIT 1', [playerId])
   return rows.length ? rows[0] : null
 }
 
@@ -269,7 +272,7 @@ function todayStr() {
 }
 
 async function pvpDailyUsed(playerId) {
-  const [rows] = await pool.query('SELECT used FROM pvp_daily WHERE player_id = ? AND day = ? LIMIT 1', [playerId, todayStr()])
+  const [rows] = await pool.query('SELECT used FROM ysj_pvp_daily WHERE player_id = ? AND day = ? LIMIT 1', [playerId, todayStr()])
   return rows.length ? Number(rows[0].used) : 0
 }
 
@@ -395,11 +398,10 @@ app.post('/api/yishijie/register', async (req, res) => {
       return json(res, 400, { error: '缺少玩家名称或设备指纹' })
     }
     let fp = deviceFingerprint
-    if (!validFingerprint(fp) && !validFingerprint(phoneFingerprint)) {
+    if (fp.length < 16 && !validFingerprint(phoneFingerprint)) {
       return json(res, 400, { error: '设备识别失败，无法注册。请确保手环和手机已正常连接。' })
     }
-    // 只有设备指纹缺失时才用手机指纹兜底；设备指纹有效就原样使用（防止双手环共用手机指纹串号）
-    if (!validFingerprint(fp)) fp = 'phone_' + phoneFingerprint.slice(0, 32)
+    if (fp.length < 16 && validFingerprint(phoneFingerprint)) fp = 'phone_' + phoneFingerprint.slice(0, 32)
     // 设备黑名单：被封禁的设备不允许注册/登录
     const bfp = await checkBannedFingerprint(fp)
     if (bfp) return json(res, 403, { error: '该设备已被封禁：' + (bfp.reason || '违规行为') + '。如有疑问请联系管理员。' })
@@ -408,14 +410,14 @@ app.post('/api/yishijie/register', async (req, res) => {
       if (existing.banned) return json(res, 403, { error: '该账号已被封禁：' + (existing.ban_reason || '违规行为') })
       // 补绑手机指纹
       if (phoneFingerprint && !existing.phone_fingerprint) {
-        await pool.query('UPDATE users SET phone_fingerprint = ? WHERE player_id = ?', [phoneFingerprint, existing.player_id])
+        await pool.query('UPDATE ysj_users SET phone_fingerprint = ? WHERE player_id = ?', [phoneFingerprint, existing.player_id])
       }
       return json(res, 200, { success: true, playerId: existing.player_id, playerName: existing.player_name, isNew: false })
     }
-    const playerId = randomPlayerId()
+    const playerId = await nextPlayerId()
     const apiKey = randomApiKey()
     await pool.query(
-      'INSERT INTO users (player_id, player_name, device_fingerprint, phone_fingerprint, api_key) VALUES (?, ?, ?, ?, ?)',
+      'INSERT INTO ysj_users (player_id, player_name, device_fingerprint, phone_fingerprint, api_key) VALUES (?, ?, ?, ?, ?)',
       [playerId, name, fp, phoneFingerprint || '', apiKey]
     )
     // 初始空存档
@@ -500,7 +502,7 @@ app.post('/api/yishijie/exchange/list', async (req, res) => {
     if (category === 'pet') {
       // 宠物挂单：只能卖装在宠物栏（宠物栏物品）里的宠物，从 survival.pet_cases 移除
       if (!petCaseId) return json(res, 400, { error: '宠物必须装在宠物栏里才能出售' })
-      const [dupPc] = await pool.query('SELECT id FROM exchange_listings WHERE item_uid = ? AND status <> "cancelled" LIMIT 1', [petCaseId])
+      const [dupPc] = await pool.query('SELECT id FROM ysj_exchange_listings WHERE item_uid = ? AND status <> "cancelled" LIMIT 1', [petCaseId])
       if (dupPc.length) return json(res, 400, { error: '该宠物已在挂单中，不能重复上架' })
       if (!save.pet_cases || !save.pet_cases.list) save.pet_cases = { list: [] }
       const cases = save.pet_cases.list || []
@@ -512,7 +514,7 @@ app.post('/api/yishijie/exchange/list', async (req, res) => {
       save.pet_cases.list = cases
       await writeSave(user.player_id, save)
       const [r] = await pool.query(
-        'INSERT INTO exchange_listings (seller_id, seller_name, item_key, item_name, item_uid, category, pet_json, item_img, qty, price, quality, affix_json, gem, dur, max_dur, broken) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO ysj_exchange_listings (seller_id, seller_name, item_key, item_name, item_uid, category, pet_json, item_img, qty, price, quality, affix_json, gem, dur, max_dur, broken) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         [user.player_id, user.player_name, p.key, name || p.name || p.key, pc.id || petCaseId, 'pet', JSON.stringify(p), img || '', 1, price, '', null, '', 0, 0, 0]
       )
       return json(res, 200, { success: true, listingId: r.insertId, save })
@@ -541,7 +543,7 @@ app.post('/api/yishijie/exchange/list', async (req, res) => {
       }
       if (!inst) return json(res, 400, { error: '背包里没有这件装备' })
       if (!inst.uid) inst.uid = 'it_' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 6)
-      const [dupGear] = await pool.query('SELECT id FROM exchange_listings WHERE item_uid = ? AND status <> "cancelled" LIMIT 1', [inst.uid])
+      const [dupGear] = await pool.query('SELECT id FROM ysj_exchange_listings WHERE item_uid = ? AND status <> "cancelled" LIMIT 1', [inst.uid])
       if (dupGear.length) return json(res, 400, { error: '该装备已在挂单中，不能重复上架' })
       list.splice(idx, 1)
       if (!list.length && save.gear) delete save.gear[key]
@@ -559,7 +561,7 @@ app.post('/api/yishijie/exchange/list', async (req, res) => {
     }
     await writeSave(user.player_id, save)
     const [r] = await pool.query(
-      'INSERT INTO exchange_listings (seller_id, seller_name, item_key, item_name, item_uid, category, item_img, qty, price, quality, affix_json, gem, dur, max_dur, broken) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO ysj_exchange_listings (seller_id, seller_name, item_key, item_name, item_uid, category, item_img, qty, price, quality, affix_json, gem, dur, max_dur, broken) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [user.player_id, user.player_name, listing.item_key, listing.item_name, listing.item_uid || '', listing.category, listing.item_img, listing.qty, price, listing.quality, listing.affix_json, listing.gem, listing.dur, listing.max_dur, listing.broken]
     )
     return json(res, 200, { success: true, listingId: r.insertId, save })
@@ -577,7 +579,7 @@ app.get('/api/yishijie/exchange/listings', async (req, res) => {
     const cat = req.query.category || 'all'
     const mine = req.query.mine === '1'
     const keyword = String(req.query.keyword || '').trim()
-    let sql = 'SELECT * FROM exchange_listings'
+    let sql = 'SELECT * FROM ysj_exchange_listings'
     const params = []
     const conds = []
     if (mine) {
@@ -598,7 +600,7 @@ app.get('/api/yishijie/exchange/listings', async (req, res) => {
     }
     if (conds.length) sql += ' WHERE ' + conds.join(' AND ')
     const [rows] = await pool.query(sql + ' ORDER BY id DESC LIMIT ? OFFSET ?', params.concat([size, offset]))
-    const countSql = sql.replace('SELECT * FROM exchange_listings', 'SELECT COUNT(*) AS total')
+    const countSql = 'SELECT COUNT(*) AS total FROM ysj_exchange_listings' + (conds.length ? ' WHERE ' + conds.join(' AND ') : '')
     const [[{ total }]] = await pool.query(countSql, params)
     // 宠物挂单附上完整宠物数据，方便手环直接渲染
     const data = rows.map(r => {
@@ -620,7 +622,7 @@ app.post('/api/yishijie/exchange/buy', async (req, res) => {
     const { listingId, buyerId, deviceFingerprint, apiKey, save } = req.body || {}
     const buyer = await authUser(buyerId, deviceFingerprint, apiKey)
     if (!buyer) return json(res, 403, { error: '鉴权失败' })
-    const [pre] = await pool.query('SELECT seller_id FROM exchange_listings WHERE id = ? AND status = "on" LIMIT 1', [listingId])
+    const [pre] = await pool.query('SELECT seller_id FROM ysj_exchange_listings WHERE id = ? AND status = "on" LIMIT 1', [listingId])
     if (!pre.length) return json(res, 404, { error: '该挂单不存在或已售出' })
     if (pre[0].seller_id === buyer.player_id) return json(res, 400, { error: '不能购买自己挂的单' })
     // 买家/卖家存档读写都串行化，防止并发购买/挂单/撤单互相覆盖
@@ -630,7 +632,7 @@ app.post('/api/yishijie/exchange/buy', async (req, res) => {
       const conn = await pool.getConnection()
       try {
         await conn.beginTransaction()
-        const [ls] = await conn.query('SELECT * FROM exchange_listings WHERE id = ? AND status = "on" FOR UPDATE', [listingId])
+        const [ls] = await conn.query('SELECT * FROM ysj_exchange_listings WHERE id = ? AND status = "on" FOR UPDATE', [listingId])
         if (!ls.length) {
           await conn.rollback()
           return json(res, 404, { error: '该挂单不存在或已售出' })
@@ -689,18 +691,18 @@ app.post('/api/yishijie/exchange/buy', async (req, res) => {
           buyerMailRewards.items = it
         }
         await conn.query(
-          'INSERT INTO mail (player_id, title, content, coins, rewards_json) VALUES (?, ?, ?, ?, ?)',
+          'INSERT INTO ysj_mail (player_id, title, content, coins, rewards_json) VALUES (?, ?, ?, ?, ?)',
           [buyer.player_id, '交易购买：' + listing.item_name, '你购买的「' + listing.item_name + '」已到货，请到邮箱领取。', 0, JSON.stringify(buyerMailRewards)]
         )
         // 卖家：扣除手续费后的金币通过邮件发放
         const sellerIncome = listing.price - fee
         await conn.query(
-          'INSERT INTO mail (player_id, title, content, coins, rewards_json) VALUES (?, ?, ?, ?, ?)',
+          'INSERT INTO ysj_mail (player_id, title, content, coins, rewards_json) VALUES (?, ?, ?, ?, ?)',
           [listing.seller_id, '交易收入：' + sellerIncome + ' 金币', '你上架的「' + listing.item_name + '」已售出，扣除 ' + fee + ' 金币手续费后入账，请到邮箱领取。', 0, JSON.stringify({ coins: sellerIncome })]
         )
-        await conn.query('UPDATE exchange_listings SET status = "sold" WHERE id = ?', [listing.id])
+        await conn.query('UPDATE ysj_exchange_listings SET status = "sold" WHERE id = ?', [listing.id])
         await conn.query(
-          'INSERT INTO exchange_trade_history (listing_id, item_key, item_name, item_uid, qty, price, fee, seller_id, buyer_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          'INSERT INTO ysj_exchange_trade_history (listing_id, item_key, item_name, item_uid, qty, price, fee, seller_id, buyer_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
           [listing.id, listing.item_key, listing.item_name, listing.item_uid || '', listing.qty, listing.price, fee, listing.seller_id, buyer.player_id]
         )
         await conn.commit()
@@ -728,7 +730,7 @@ app.post('/api/yishijie/exchange/cancel', async (req, res) => {
       const conn = await pool.getConnection()
       try {
         await conn.beginTransaction()
-        const [ls] = await conn.query('SELECT * FROM exchange_listings WHERE id = ? AND status = "on" FOR UPDATE', [listingId])
+        const [ls] = await conn.query('SELECT * FROM ysj_exchange_listings WHERE id = ? AND status = "on" FOR UPDATE', [listingId])
         if (!ls.length) {
           await conn.rollback()
           return json(res, 404, { error: '该挂单不存在或已售出' })
@@ -772,7 +774,7 @@ app.post('/api/yishijie/exchange/cancel', async (req, res) => {
           addItem(save, listing, listing.qty)
         }
         await writeSave(user.player_id, save)
-        await conn.query('UPDATE exchange_listings SET status = "cancelled" WHERE id = ?', [listing.id])
+        await conn.query('UPDATE ysj_exchange_listings SET status = "cancelled" WHERE id = ?', [listing.id])
         await conn.commit()
         return json(res, 200, { success: true, save })
       } catch (e) {
@@ -791,7 +793,7 @@ app.get('/api/yishijie/exchange/history', async (req, res) => {
   try {
     const { playerId } = req.query
     const [rows] = await pool.query(
-      'SELECT * FROM exchange_trade_history WHERE seller_id = ? OR buyer_id = ? ORDER BY id DESC LIMIT 100',
+      'SELECT * FROM ysj_exchange_trade_history WHERE seller_id = ? OR buyer_id = ? ORDER BY id DESC LIMIT 100',
       [playerId, playerId]
     )
     return json(res, 200, { success: true, data: rows })
@@ -812,7 +814,7 @@ app.post('/api/yishijie/recharge/order', async (req, res) => {
     const qty = Math.floor(amt * COIN_PER_YUAN)
     const orderId = randomOrderId()
     await pool.query(
-      'INSERT INTO recharge_orders (order_id, player_id, amount, item, qty) VALUES (?, ?, ?, ?, ?)',
+      'INSERT INTO ysj_recharge_orders (order_id, player_id, amount, item, qty) VALUES (?, ?, ?, ?, ?)',
       [orderId, user.player_id, amt, it, qty]
     )
     return json(res, 200, { success: true, orderId, amount: amt, item: it, qty })
@@ -839,7 +841,7 @@ app.post('/api/yishijie/recharge/callback', async (req, res) => {
 app.post('/api/yishijie/admin/mark-paid', async (req, res) => {
   try {
     const { orderId, secret } = req.body || {}
-    if (secret !== SECRET) return json(res, 403, { error: '管理密钥错误' })
+    if (!requireAdmin(req, res)) return
     await creditOrder(orderId)
     return json(res, 200, { success: true })
   } catch (e) {
@@ -848,21 +850,20 @@ app.post('/api/yishijie/admin/mark-paid', async (req, res) => {
 })
 
 async function creditOrder(orderId) {
-  const [rows] = await pool.query('SELECT * FROM recharge_orders WHERE order_id = ? LIMIT 1', [orderId])
+  const [rows] = await pool.query('SELECT * FROM ysj_recharge_orders WHERE order_id = ? LIMIT 1', [orderId])
   if (!rows.length) throw new Error('订单不存在')
   const order = rows[0]
   if (order.status === 'paid') return
-  // 玩家写锁 + 状态二次校验：防止并发回调重复到账
+  // 改用邮件到账：无论玩家有无存档，邮件一定送达，玩家在游戏里领取，避免无存档时丢金币
   return withPlayerLock(order.player_id, async () => {
-    const [rows2] = await pool.query('SELECT * FROM recharge_orders WHERE order_id = ? LIMIT 1', [orderId])
+    const [rows2] = await pool.query('SELECT * FROM ysj_recharge_orders WHERE order_id = ? LIMIT 1', [orderId])
     if (!rows2.length) throw new Error('订单不存在')
     if (rows2[0].status === 'paid') return
-    const save = await readSave(order.player_id)
-    if (save) {
-      if (order.item === 'coins') setCoins(save, getCoins(save) + order.qty)
-      await writeSave(order.player_id, save)
-    }
-    await pool.query('UPDATE recharge_orders SET status = "paid", paid_at = NOW() WHERE order_id = ? AND status <> "paid"', [orderId])
+    await pool.query(
+      'INSERT INTO ysj_mail (player_id, title, content, coins, rewards_json) VALUES (?, ?, ?, ?, ?)',
+      [order.player_id, `充值到账 ¥${order.amount}`, `您已成功充值 ¥${order.amount}，获得 ${order.qty} 金币，请到邮箱查收！`, order.qty, JSON.stringify({ coins: order.qty })]
+    )
+    await pool.query('UPDATE ysj_recharge_orders SET status = "paid", paid_at = NOW() WHERE order_id = ? AND status <> "paid"', [orderId])
   })
 }
 
@@ -877,7 +878,7 @@ app.get('/api/yishijie/payment/orders', async (req, res) => {
     const user = await authUser(playerId, deviceFingerprint, apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
     const [rows] = await pool.query(
-      'SELECT order_id, amount, qty, status, created_at, paid_at FROM recharge_orders WHERE player_id = ? ORDER BY id DESC LIMIT 10',
+      'SELECT order_id, amount, qty, status, created_at, paid_at FROM ysj_recharge_orders WHERE player_id = ? ORDER BY id DESC LIMIT 10',
       [user.player_id]
     )
     return json(res, 200, { success: true, data: rows })
@@ -917,13 +918,13 @@ app.post('/api/yishijie/payment/afdian-webhook', async (req, res) => {
     const conn = await pool.getConnection()
     try {
       await conn.beginTransaction()
-      const [urows] = await conn.query('SELECT player_id FROM users WHERE player_id = ? LIMIT 1', [String(uid)])
+      const [urows] = await conn.query('SELECT player_id FROM ysj_users WHERE player_id = ? LIMIT 1', [String(uid)])
       if (!urows.length) {
         await conn.rollback()
         console.warn('[爱发电] 玩家不存在，已忽略:', uid)
         return json(res, 200, { ec: 200, em: '' })
       }
-      const [existing] = await conn.query('SELECT status FROM recharge_orders WHERE order_id = ? LIMIT 1 FOR UPDATE', [orderId])
+      const [existing] = await conn.query('SELECT status FROM ysj_recharge_orders WHERE order_id = ? LIMIT 1 FOR UPDATE', [orderId])
       if (existing.length && existing[0].status === 'paid') {
         await conn.rollback()
         return json(res, 200, { ec: 200, em: '' })
@@ -937,11 +938,11 @@ app.post('/api/yishijie/payment/afdian-webhook', async (req, res) => {
       }
       // 充值到账改为发邮件，由玩家在邮箱里领取，避免直接改写服务器存档
       await conn.query(
-        'INSERT INTO mail (player_id, title, content, coins, rewards_json) VALUES (?, ?, ?, ?, ?)',
+        'INSERT INTO ysj_mail (player_id, title, content, coins, rewards_json) VALUES (?, ?, ?, ?, ?)',
         [String(uid), `充值到账 ¥${totalAmount}`, `您已成功充值 ¥${totalAmount}，获得 ${coins} 金币，请到邮箱查收！`, coins, JSON.stringify({ coins })]
       )
       await conn.query(
-        'INSERT INTO recharge_orders (order_id, player_id, amount, item, qty, status, paid_at) VALUES (?, ?, ?, ?, ?, "paid", NOW()) ON DUPLICATE KEY UPDATE status = "paid", paid_at = NOW()',
+        'INSERT INTO ysj_recharge_orders (order_id, player_id, amount, item, qty, status, paid_at) VALUES (?, ?, ?, ?, ?, "paid", NOW()) ON DUPLICATE KEY UPDATE status = "paid", paid_at = NOW()',
         [orderId, String(uid), totalAmount, 'coins', coins]
       )
       await conn.commit()
@@ -962,7 +963,7 @@ app.post('/api/yishijie/payment/afdian-webhook', async (req, res) => {
 // ============ 公告 / 版本 / 健康 ============
 app.get('/api/yishijie/announcements', async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM announcements ORDER BY id DESC LIMIT 20')
+    const [rows] = await pool.query('SELECT * FROM ysj_announcements ORDER BY id DESC LIMIT 20')
     return json(res, 200, { success: true, data: rows })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
@@ -975,7 +976,7 @@ app.get('/api/yishijie/mail/:playerId', async (req, res) => {
     const user = await authUser(req.params.playerId, req.query.deviceFingerprint, req.query.apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
     const [rows] = await pool.query(
-      'SELECT id, title, content, coins, rewards_json, claimed, created_at FROM mail WHERE player_id = ? ORDER BY id DESC LIMIT 50',
+      'SELECT id, title, content, coins, rewards_json, claimed, created_at FROM ysj_mail WHERE player_id = ? ORDER BY id DESC LIMIT 50',
       [user.player_id]
     )
     const data = rows.map(m => Object.assign({}, m, {
@@ -997,7 +998,7 @@ app.post('/api/yishijie/mail/claim', async (req, res) => {
       const conn = await pool.getConnection()
       try {
         await conn.beginTransaction()
-        const [rows] = await conn.query('SELECT * FROM mail WHERE id = ? AND player_id = ? FOR UPDATE', [mailId, user.player_id])
+        const [rows] = await conn.query('SELECT * FROM ysj_mail WHERE id = ? AND player_id = ? FOR UPDATE', [mailId, user.player_id])
         if (!rows.length) {
           await conn.rollback()
           return json(res, 404, { error: '邮件不存在' })
@@ -1023,7 +1024,7 @@ app.post('/api/yishijie/mail/claim', async (req, res) => {
         const rewards = parseJsonSafe(mail.rewards_json, { coins: mail.coins || 0 })
         applied = applyRewardsToSave(save, rewards)
         await writeSave(user.player_id, save)
-        const [up] = await conn.query('UPDATE mail SET claimed = 1 WHERE id = ? AND claimed = 0', [mail.id])
+        const [up] = await conn.query('UPDATE ysj_mail SET claimed = 1 WHERE id = ? AND claimed = 0', [mail.id])
         if (!up.affectedRows) {
           await conn.rollback()
           return json(res, 200, { success: true, already: true })
@@ -1046,11 +1047,11 @@ app.post('/api/yishijie/mail/claim', async (req, res) => {
 app.post('/api/yishijie/admin/mail/send', async (req, res) => {
   try {
     const { secret, playerId, title, content, coins, rewards } = req.body || {}
-    if (secret !== SECRET) return json(res, 403, { error: '管理密钥错误' })
+    if (!requireAdmin(req, res)) return
     if (!playerId || !title) return json(res, 400, { error: '参数不完整' })
     const rewardsJson = rewards && typeof rewards === 'object' ? JSON.stringify(rewards) : (coins ? JSON.stringify({ coins: Number(coins) || 0 }) : null)
     await pool.query(
-      'INSERT INTO mail (player_id, title, content, coins, rewards_json) VALUES (?, ?, ?, ?, ?)',
+      'INSERT INTO ysj_mail (player_id, title, content, coins, rewards_json) VALUES (?, ?, ?, ?, ?)',
       [playerId, title, content || '', Number(coins) || 0, rewardsJson]
     )
     return json(res, 200, { success: true })
@@ -1067,7 +1068,7 @@ app.post('/api/yishijie/redeem/redeem', async (req, res) => {
     if (!user) return json(res, 403, { error: '鉴权失败' })
     if (!code) return json(res, 400, { error: '请输入激活码' })
     const c = String(code).trim().toUpperCase()
-    const [rows] = await pool.query('SELECT * FROM redeem_codes WHERE code = ? LIMIT 1', [c])
+    const [rows] = await pool.query('SELECT * FROM ysj_redeem_codes WHERE code = ? LIMIT 1', [c])
     if (!rows.length) return json(res, 404, { error: '激活码不存在' })
     const cd = rows[0]
     if (cd.expires_at && new Date(cd.expires_at).getTime() < Date.now()) {
@@ -1078,17 +1079,17 @@ app.post('/api/yishijie/redeem/redeem', async (req, res) => {
     }
     // 唯一约束防重复兑换；先占位后回滚的并发窗口由数据库唯一键兜底
     try {
-      await pool.query('INSERT INTO redeem_uses (code, player_id) VALUES (?, ?)', [c, user.player_id])
+      await pool.query('INSERT INTO ysj_redeem_uses (code, player_id) VALUES (?, ?)', [c, user.player_id])
     } catch (e) {
       return json(res, 400, { error: '您已使用过该激活码' })
     }
     const rewards = parseJsonSafe(cd.rewards_json, null)
     const rewardsJson = rewards && typeof rewards === 'object' ? JSON.stringify(rewards) : '{}'
     await pool.query(
-      'INSERT INTO mail (player_id, title, content, coins, rewards_json) VALUES (?, ?, ?, ?, ?)',
+      'INSERT INTO ysj_mail (player_id, title, content, coins, rewards_json) VALUES (?, ?, ?, ?, ?)',
       [user.player_id, '激活码奖励：' + c, '您已成功兑换激活码 ' + c + '，奖励已发放到邮箱，请查收', 0, rewardsJson]
     )
-    await pool.query('UPDATE redeem_codes SET used_count = used_count + 1 WHERE code = ?', [c])
+    await pool.query('UPDATE ysj_redeem_codes SET used_count = used_count + 1 WHERE code = ?', [c])
     return json(res, 200, { success: true, message: '兑换成功，奖励已发送到邮箱', rewards: rewards || {} })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
@@ -1098,11 +1099,11 @@ app.post('/api/yishijie/redeem/redeem', async (req, res) => {
 app.post('/api/yishijie/admin/code/create', async (req, res) => {
   try {
     const { secret, code, rewards, maxUses, expiresAt, description } = req.body || {}
-    if (secret !== SECRET) return json(res, 403, { error: '管理密钥错误' })
+    if (!requireAdmin(req, res)) return
     const c = String(code || '').trim().toUpperCase()
     if (!c || !rewards || typeof rewards !== 'object') return json(res, 400, { error: '缺少激活码或奖励内容' })
     await pool.query(
-      'INSERT INTO redeem_codes (code, rewards_json, max_uses, expires_at, description) VALUES (?, ?, ?, ?, ?)',
+      'INSERT INTO ysj_redeem_codes (code, rewards_json, max_uses, expires_at, description) VALUES (?, ?, ?, ?, ?)',
       [c, JSON.stringify(rewards), Math.max(1, parseInt(maxUses, 10) || 1), expiresAt || null, String(description || '')]
     )
     return json(res, 200, { success: true, message: '激活码创建成功' })
@@ -1114,8 +1115,8 @@ app.post('/api/yishijie/admin/code/create', async (req, res) => {
 
 app.get('/api/yishijie/admin/code/list', async (req, res) => {
   try {
-    if (req.query.secret !== SECRET) return json(res, 403, { error: '管理密钥错误' })
-    const [rows] = await pool.query('SELECT code, max_uses, used_count, expires_at, description, created_at FROM redeem_codes ORDER BY created_at DESC')
+    if (!requireAdmin(req, res)) return
+    const [rows] = await pool.query('SELECT code, max_uses, used_count, expires_at, description, created_at FROM ysj_redeem_codes ORDER BY created_at DESC')
     return json(res, 200, { success: true, codes: rows })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
@@ -1124,9 +1125,9 @@ app.get('/api/yishijie/admin/code/list', async (req, res) => {
 
 app.delete('/api/yishijie/admin/code/:code', async (req, res) => {
   try {
-    if (req.query.secret !== SECRET) return json(res, 403, { error: '管理密钥错误' })
+    if (!requireAdmin(req, res)) return
     const c = decodeURIComponent(req.params.code).toUpperCase()
-    await pool.query('DELETE FROM redeem_codes WHERE code = ?', [c])
+    await pool.query('DELETE FROM ysj_redeem_codes WHERE code = ?', [c])
     return json(res, 200, { success: true })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
@@ -1139,14 +1140,14 @@ app.get('/api/yishijie/leaderboard', async (req, res) => {
     const type = req.query.type || 'level'
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || '50', 10)))
     const [rows] = await pool.query(
-      'SELECT s.player_id, s.data, u.player_name FROM saves s JOIN users u ON u.player_id = s.player_id WHERE u.banned = 0'
+      'SELECT s.player_id, s.data, u.player_name FROM ysj_saves s JOIN ysj_users u ON u.player_id = s.player_id WHERE u.banned = 0'
     )
     const list = []
     for (const r of rows) {
       const save = parseJsonSafe(r.data, null)
       if (!save) continue
       if (type === 'tower') {
-        const t = parseJsonSafe(save.tower, null)
+        const t = save.tower
         list.push({ playerId: r.player_id, playerName: r.player_name, value: t && t.bestFloor ? Number(t.bestFloor) : 0 })
       } else if (type === 'pet') {
         const pets = (save.pets && save.pets.list) || []
@@ -1158,7 +1159,7 @@ app.get('/api/yishijie/leaderboard', async (req, res) => {
         }
         list.push({ playerId: r.player_id, playerName: r.player_name, value: power, topLv, count: pets.length })
       } else {
-        const st = parseJsonSafe(save.stats, null)
+        const st = save.stats
         list.push({ playerId: r.player_id, playerName: r.player_name, value: st ? (Number(st.lv) || 1) : 1, exp: st ? (Number(st.exp) || 0) : 0 })
       }
     }
@@ -1176,14 +1177,14 @@ app.get('/api/yishijie/pvp/targets', async (req, res) => {
     const user = await authUser(playerId, deviceFingerprint, apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
     const [rows] = await pool.query(
-      'SELECT s.player_id, s.data, u.player_name, r.rating, r.wins, r.losses FROM saves s JOIN users u ON u.player_id = s.player_id LEFT JOIN pvp_ratings r ON r.player_id = s.player_id WHERE s.player_id <> ? AND u.banned = 0',
+      'SELECT s.player_id, s.data, u.player_name, r.rating, r.wins, r.losses FROM ysj_saves s JOIN ysj_users u ON u.player_id = s.player_id LEFT JOIN ysj_pvp_ratings r ON r.player_id = s.player_id WHERE s.player_id <> ? AND u.banned = 0',
       [user.player_id]
     )
     const list = []
     for (const r of rows) {
       const save = parseJsonSafe(r.data, null)
       if (!save) continue
-      const st = parseJsonSafe(save.stats, null)
+      const st = save.stats
       list.push({
         playerId: r.player_id,
         playerName: r.player_name,
@@ -1206,14 +1207,14 @@ app.get('/api/yishijie/pvp/matchmake', async (req, res) => {
     if (!user) return json(res, 403, { error: '鉴权失败' })
     const ra = ratingOf(await getRatingRow(user.player_id))
     const [rows] = await pool.query(
-      'SELECT s.player_id, s.data, u.player_name, r.rating FROM saves s JOIN users u ON u.player_id = s.player_id LEFT JOIN pvp_ratings r ON r.player_id = s.player_id WHERE s.player_id <> ? AND u.banned = 0',
+      'SELECT s.player_id, s.data, u.player_name, r.rating FROM ysj_saves s JOIN ysj_users u ON u.player_id = s.player_id LEFT JOIN ysj_pvp_ratings r ON r.player_id = s.player_id WHERE s.player_id <> ? AND u.banned = 0',
       [user.player_id]
     )
     const list = []
     for (const r of rows) {
       const save = parseJsonSafe(r.data, null)
       if (!save) continue
-      const st = parseJsonSafe(save.stats, null)
+      const st = save.stats
       const rt = r.rating ? Number(r.rating) : 1000
       list.push({
         playerId: r.player_id,
@@ -1238,7 +1239,7 @@ app.get('/api/yishijie/pvp/defender', async (req, res) => {
     if (!targetId || targetId === user.player_id) return json(res, 400, { error: '目标无效' })
     const save = await readSave(targetId)
     if (!save) return json(res, 404, { error: '该玩家暂无存档' })
-    const [u] = await pool.query('SELECT player_name FROM users WHERE player_id = ? LIMIT 1', [targetId])
+    const [u] = await pool.query('SELECT player_name FROM ysj_users WHERE player_id = ? LIMIT 1', [targetId])
     const rating = await getRatingRow(targetId)
     return json(res, 200, {
       success: true,
@@ -1247,7 +1248,7 @@ app.get('/api/yishijie/pvp/defender', async (req, res) => {
         playerName: u.length ? u[0].player_name : '未知玩家',
         rating: ratingOf(rating),
         class: parseJsonSafe(save.class, null),
-        stats: parseJsonSafe(save.stats, null),
+        stats: save.stats,
         equip: parseJsonSafe(save.equip, null),
         gear: parseJsonSafe(save.gear, null),
         pets: parseJsonSafe(save.pets, { list: [], active: '' })
@@ -1264,14 +1265,14 @@ app.post('/api/yishijie/pvp/report', async (req, res) => {
     const user = await authUser(playerId, deviceFingerprint, apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
     if (!targetId || targetId === user.player_id) return json(res, 400, { error: '目标无效' })
-    const [tu] = await pool.query('SELECT player_id FROM users WHERE player_id = ? LIMIT 1', [targetId])
+    const [tu] = await pool.query('SELECT player_id FROM ysj_users WHERE player_id = ? LIMIT 1', [targetId])
     if (!tu.length) return json(res, 404, { error: '目标玩家不存在' })
     // 匹配战每日 12 次限制
     const day = todayStr()
     const used = await pvpDailyUsed(user.player_id)
     if (used >= 12) return json(res, 403, { error: '今日匹配战次数已用完（12次），明天再来吧' })
     await pool.query(
-      'INSERT INTO pvp_daily (player_id, day, used) VALUES (?, ?, 1) ON DUPLICATE KEY UPDATE used = used + 1',
+      'INSERT INTO ysj_pvp_daily (player_id, day, used) VALUES (?, ?, 1) ON DUPLICATE KEY UPDATE used = used + 1',
       [user.player_id, day]
     )
     const winFlag = !!win
@@ -1284,15 +1285,15 @@ app.post('/api/yishijie/pvp/report', async (req, res) => {
     const newRa = Math.max(0, Ra + delta)
     const newRd = Math.max(0, Rd - delta)
     await pool.query(
-      'INSERT INTO pvp_ratings (player_id, rating, wins, losses) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE rating = VALUES(rating), wins = wins + VALUES(wins), losses = losses + VALUES(losses)',
+      'INSERT INTO ysj_pvp_ratings (player_id, rating, wins, losses) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE rating = VALUES(rating), wins = wins + VALUES(wins), losses = losses + VALUES(losses)',
       [user.player_id, newRa, winFlag ? 1 : 0, winFlag ? 0 : 1]
     )
     await pool.query(
-      'INSERT INTO pvp_ratings (player_id, rating, wins, losses) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE rating = VALUES(rating), wins = wins + VALUES(wins), losses = losses + VALUES(losses)',
+      'INSERT INTO ysj_pvp_ratings (player_id, rating, wins, losses) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE rating = VALUES(rating), wins = wins + VALUES(wins), losses = losses + VALUES(losses)',
       [targetId, newRd, winFlag ? 0 : 1, winFlag ? 1 : 0]
     )
     await pool.query(
-      'INSERT INTO pvp_matches (attacker_id, defender_id, attacker_win, rating_delta) VALUES (?, ?, ?, ?)',
+      'INSERT INTO ysj_pvp_matches (attacker_id, defender_id, attacker_win, rating_delta) VALUES (?, ?, ?, ?)',
       [user.player_id, targetId, winFlag ? 1 : 0, delta]
     )
     return json(res, 200, { success: true, rating: newRa, delta, win: winFlag })
@@ -1308,7 +1309,7 @@ app.post('/api/yishijie/pvp/match', async (req, res) => {
     const user = await authUser(playerId, deviceFingerprint, apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
     if (!targetId || targetId === user.player_id) return json(res, 400, { error: '目标无效' })
-    const [tu] = await pool.query('SELECT player_id, player_name FROM users WHERE player_id = ? LIMIT 1', [targetId])
+    const [tu] = await pool.query('SELECT player_id, player_name FROM ysj_users WHERE player_id = ? LIMIT 1', [targetId])
     if (!tu.length) return json(res, 404, { error: '目标玩家不存在' })
     // 匹配战每日 12 次限制
     const day = todayStr()
@@ -1321,7 +1322,7 @@ app.post('/api/yishijie/pvp/match', async (req, res) => {
     const result = pvpSimulate(a, d, user.player_name || user.player_id, tu[0].player_name || targetId)
     const winFlag = !!result.aWin
     await pool.query(
-      'INSERT INTO pvp_daily (player_id, day, used) VALUES (?, ?, 1) ON DUPLICATE KEY UPDATE used = used + 1',
+      'INSERT INTO ysj_pvp_daily (player_id, day, used) VALUES (?, ?, 1) ON DUPLICATE KEY UPDATE used = used + 1',
       [user.player_id, day]
     )
     const ra = await getRatingRow(user.player_id)
@@ -1333,20 +1334,20 @@ app.post('/api/yishijie/pvp/match', async (req, res) => {
     const newRa = Math.max(0, Ra + delta)
     const newRd = Math.max(0, Rd - delta)
     await pool.query(
-      'INSERT INTO pvp_ratings (player_id, rating, wins, losses) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE rating = VALUES(rating), wins = wins + VALUES(wins), losses = losses + VALUES(losses)',
+      'INSERT INTO ysj_pvp_ratings (player_id, rating, wins, losses) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE rating = VALUES(rating), wins = wins + VALUES(wins), losses = losses + VALUES(losses)',
       [user.player_id, newRa, winFlag ? 1 : 0, winFlag ? 0 : 1]
     )
     await pool.query(
-      'INSERT INTO pvp_ratings (player_id, rating, wins, losses) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE rating = VALUES(rating), wins = wins + VALUES(wins), losses = losses + VALUES(losses)',
+      'INSERT INTO ysj_pvp_ratings (player_id, rating, wins, losses) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE rating = VALUES(rating), wins = wins + VALUES(wins), losses = losses + VALUES(losses)',
       [targetId, newRd, winFlag ? 0 : 1, winFlag ? 1 : 0]
     )
     const [matchIns] = await pool.query(
-      'INSERT INTO pvp_matches (attacker_id, defender_id, attacker_win, rating_delta) VALUES (?, ?, ?, ?)',
+      'INSERT INTO ysj_pvp_matches (attacker_id, defender_id, attacker_win, rating_delta) VALUES (?, ?, ?, ?)',
       [user.player_id, targetId, winFlag ? 1 : 0, delta]
     )
     try {
       await pool.query(
-        'INSERT INTO pvp_match_logs (match_id, log_json) VALUES (?, ?)',
+        'INSERT INTO ysj_pvp_match_logs (match_id, log_json) VALUES (?, ?)',
         [matchIns.insertId, JSON.stringify(result.log || [])]
       )
     } catch (e) {
@@ -1385,7 +1386,7 @@ app.get('/api/yishijie/pvp/leaderboard', async (req, res) => {
     const user = await authUser(playerId, deviceFingerprint, apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
     const [rows] = await pool.query(
-      'SELECT u.player_name, r.rating, r.wins, r.losses FROM pvp_ratings r JOIN users u ON u.player_id = r.player_id WHERE u.banned = 0 ORDER BY r.rating DESC, r.wins DESC LIMIT 50'
+      'SELECT u.player_name, r.rating, r.wins, r.losses FROM ysj_pvp_ratings r JOIN ysj_users u ON u.player_id = r.player_id WHERE u.banned = 0 ORDER BY r.rating DESC, r.wins DESC LIMIT 50'
     )
     return json(res, 200, { success: true, data: rows })
   } catch (e) {
@@ -1402,10 +1403,10 @@ app.get('/api/yishijie/pvp/matches', async (req, res) => {
     const [rows] = await pool.query(
       `SELECT m.id, m.attacker_id, m.defender_id, m.attacker_win, m.rating_delta, m.created_at,
               ua.player_name AS attacker_name, ud.player_name AS defender_name, l.log_json
-       FROM pvp_matches m
-       LEFT JOIN users ua ON ua.player_id = m.attacker_id
-       LEFT JOIN users ud ON ud.player_id = m.defender_id
-       LEFT JOIN pvp_match_logs l ON l.match_id = m.id
+       FROM ysj_pvp_matches m
+       LEFT JOIN ysj_users ua ON ua.player_id = m.attacker_id
+       LEFT JOIN ysj_users ud ON ud.player_id = m.defender_id
+       LEFT JOIN ysj_pvp_match_logs l ON l.match_id = m.id
        WHERE m.attacker_id = ? OR m.defender_id = ?
        ORDER BY m.id DESC LIMIT 20`,
       [user.player_id, user.player_id]
@@ -1436,7 +1437,7 @@ app.get('/api/yishijie/pvp/matches', async (req, res) => {
 // ============ 房间对战（参照垃圾佬：4位房间码，双方确认后服务器模拟） ============
 async function cleanRooms() {
   // 清理超过 2 小时的房间
-  await pool.query('DELETE FROM pvp_rooms WHERE created_at < DATE_SUB(NOW(), INTERVAL 2 HOUR)')
+  await pool.query('DELETE FROM ysj_pvp_rooms WHERE created_at < DATE_SUB(NOW(), INTERVAL 2 HOUR)')
 }
 
 app.post('/api/yishijie/pvp/room/create', async (req, res) => {
@@ -1446,15 +1447,15 @@ app.post('/api/yishijie/pvp/room/create', async (req, res) => {
     if (!user) return json(res, 403, { error: '鉴权失败' })
     await cleanRooms()
     // 玩家只能在一个房间
-    await pool.query('DELETE FROM pvp_rooms WHERE (host_id = ? OR guest_id = ?) AND status IN ("waiting","ready")', [user.player_id, user.player_id])
+    await pool.query('DELETE FROM ysj_pvp_rooms WHERE (host_id = ? OR guest_id = ?) AND status IN ("waiting","ready")', [user.player_id, user.player_id])
     let code = ''
     for (let i = 0; i < 20; i++) {
       code = String(Math.floor(1000 + Math.random() * 9000))
-      const [ex] = await pool.query('SELECT code FROM pvp_rooms WHERE code = ? LIMIT 1', [code])
+      const [ex] = await pool.query('SELECT code FROM ysj_pvp_rooms WHERE code = ? LIMIT 1', [code])
       if (!ex.length) break
     }
     await pool.query(
-      'INSERT INTO pvp_rooms (code, host_id, host_name) VALUES (?, ?, ?)',
+      'INSERT INTO ysj_pvp_rooms (code, host_id, host_name) VALUES (?, ?, ?)',
       [code, user.player_id, user.player_name]
     )
     return json(res, 200, { success: true, roomCode: code })
@@ -1470,13 +1471,13 @@ app.post('/api/yishijie/pvp/room/join', async (req, res) => {
     if (!user) return json(res, 403, { error: '鉴权失败' })
     const code = String(roomCode || '').trim()
     if (!/^\d{4}$/.test(code)) return json(res, 400, { error: '房间码为4位数字' })
-    const [rows] = await pool.query('SELECT * FROM pvp_rooms WHERE code = ? LIMIT 1', [code])
+    const [rows] = await pool.query('SELECT * FROM ysj_pvp_rooms WHERE code = ? LIMIT 1', [code])
     if (!rows.length) return json(res, 404, { error: '房间不存在或已关闭' })
     const room = rows[0]
     if (room.status !== 'waiting') return json(res, 400, { error: '房间已满或已开始对战' })
     if (room.host_id === user.player_id) return json(res, 400, { error: '不能加入自己的房间' })
-    await pool.query('DELETE FROM pvp_rooms WHERE (host_id = ? OR guest_id = ?) AND code <> ? AND status IN ("waiting","ready")', [user.player_id, user.player_id, code])
-    await pool.query('UPDATE pvp_rooms SET guest_id = ?, guest_name = ?, status = "ready" WHERE code = ?', [user.player_id, user.player_name, code])
+    await pool.query('DELETE FROM ysj_pvp_rooms WHERE (host_id = ? OR guest_id = ?) AND code <> ? AND status IN ("waiting","ready")', [user.player_id, user.player_id, code])
+    await pool.query('UPDATE ysj_pvp_rooms SET guest_id = ?, guest_name = ?, status = "ready" WHERE code = ?', [user.player_id, user.player_name, code])
     return json(res, 200, { success: true, roomCode: code })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
@@ -1486,7 +1487,7 @@ app.post('/api/yishijie/pvp/room/join', async (req, res) => {
 app.get('/api/yishijie/pvp/room/:code', async (req, res) => {
   try {
     const code = req.params.code
-    const [rows] = await pool.query('SELECT * FROM pvp_rooms WHERE code = ? LIMIT 1', [code])
+    const [rows] = await pool.query('SELECT * FROM ysj_pvp_rooms WHERE code = ? LIMIT 1', [code])
     if (!rows.length) return json(res, 200, { success: false, error: '房间不存在或已关闭' })
     const r = rows[0]
     return json(res, 200, {
@@ -1513,7 +1514,7 @@ app.post('/api/yishijie/pvp/room/fight', async (req, res) => {
     const user = await authUser(playerId, deviceFingerprint, apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
     const code = String(roomCode || '').trim()
-    const [rows] = await pool.query('SELECT * FROM pvp_rooms WHERE code = ? LIMIT 1', [code])
+    const [rows] = await pool.query('SELECT * FROM ysj_pvp_rooms WHERE code = ? LIMIT 1', [code])
     if (!rows.length) return json(res, 404, { error: '房间不存在' })
     const room = rows[0]
     if (room.status === 'finished') return json(res, 400, { error: '对战已结束' })
@@ -1527,7 +1528,7 @@ app.post('/api/yishijie/pvp/room/fight', async (req, res) => {
     const g = pvpBuildStats(guestSave)
     const result = pvpSimulate(h, g, room.host_name || room.host_id, room.guest_name || room.guest_id)
     await pool.query(
-      'UPDATE pvp_rooms SET status = "finished", winner = ?, log = ? WHERE code = ?',
+      'UPDATE ysj_pvp_rooms SET status = "finished", winner = ?, log = ? WHERE code = ?',
       [result.winner, result.log.join('\n'), code]
     )
     return json(res, 200, { success: true, winner: result.winner, aWin: result.aWin, log: result.log })
@@ -1538,7 +1539,7 @@ app.post('/api/yishijie/pvp/room/fight', async (req, res) => {
 
 app.get('/api/yishijie/version', async (req, res) => {
   try {
-    const [rows] = await pool.query("SELECT svalue FROM settings WHERE skey = 'app_version' LIMIT 1")
+    const [rows] = await pool.query("SELECT svalue FROM ysj_settings WHERE skey = 'app_version' LIMIT 1")
     const ver = rows.length ? parseJsonSafe(rows[0].svalue, null) : null
     return json(res, 200, {
       success: true,
@@ -1564,7 +1565,7 @@ app.post('/api/yishijie/admin/version', async (req, res) => {
       updateNotes: String(updateNotes || '')
     }
     await pool.query(
-      "INSERT INTO settings (skey, svalue) VALUES ('app_version', ?) ON DUPLICATE KEY UPDATE svalue = VALUES(svalue)",
+      "INSERT INTO ysj_settings (skey, svalue) VALUES ('app_version', ?) ON DUPLICATE KEY UPDATE svalue = VALUES(svalue)",
       [JSON.stringify(ver)]
     )
     return json(res, 200, { success: true, message: '版本信息已保存' })
@@ -1577,7 +1578,6 @@ app.get('/health', (req, res) => json(res, 200, { ok: true }))
 
 // 管理后台页面（参照垃圾佬 /admin WebView 入口）
 app.get('/admin', (req, res) => {
-  if (!requireAdmin(req, res)) return
   res.sendFile(path.join(path.dirname(fileURLToPath(import.meta.url)), 'admin.html'))
 })
 
@@ -1585,12 +1585,12 @@ app.get('/admin', (req, res) => {
 app.get('/api/yishijie/admin/stats', async (req, res) => {
   try {
     if (!requireAdmin(req, res)) return
-    const [[{ users }]] = await pool.query('SELECT COUNT(*) AS users FROM users')
-    const [[{ saves }]] = await pool.query('SELECT COUNT(*) AS saves FROM saves')
-    const [[{ listings }]] = await pool.query('SELECT COUNT(*) AS listings FROM exchange_listings WHERE status = "on"')
-    const [[{ paidOrders }]] = await pool.query('SELECT COUNT(*) AS paidOrders FROM recharge_orders WHERE status = "paid"')
-    const [[{ mails }]] = await pool.query('SELECT COUNT(*) AS mails FROM mail')
-    const [[{ bannedUsers }]] = await pool.query('SELECT COUNT(*) AS bannedUsers FROM users WHERE banned = 1')
+    const [[{ users }]] = await pool.query('SELECT COUNT(*) AS users FROM ysj_users')
+    const [[{ saves }]] = await pool.query('SELECT COUNT(*) AS saves FROM ysj_saves')
+    const [[{ listings }]] = await pool.query('SELECT COUNT(*) AS listings FROM ysj_exchange_listings WHERE status = "on"')
+    const [[{ paidOrders }]] = await pool.query('SELECT COUNT(*) AS paidOrders FROM ysj_recharge_orders WHERE status = "paid"')
+    const [[{ mails }]] = await pool.query('SELECT COUNT(*) AS mails FROM ysj_mail')
+    const [[{ bannedUsers }]] = await pool.query('SELECT COUNT(*) AS bannedUsers FROM ysj_users WHERE banned = 1')
     return json(res, 200, { success: true, data: { users, saves, listings, paidOrders, mails, bannedUsers } })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
@@ -1601,7 +1601,7 @@ app.get('/api/yishijie/admin/users', async (req, res) => {
   try {
     if (!requireAdmin(req, res)) return
     const keyword = String(req.query.keyword || '').toLowerCase()
-    let sql = 'SELECT u.player_id, u.player_name, u.created_at, u.banned, u.ban_reason, u.name_changed, s.data FROM users u LEFT JOIN saves s ON s.player_id = u.player_id'
+    let sql = 'SELECT u.player_id, u.player_name, u.created_at, u.banned, u.ban_reason, u.name_changed, s.data FROM ysj_users u LEFT JOIN ysj_saves s ON s.player_id = u.player_id'
     const params = []
     if (keyword) {
       sql += ' WHERE u.player_id LIKE ? OR u.player_name LIKE ?'
@@ -1611,7 +1611,7 @@ app.get('/api/yishijie/admin/users', async (req, res) => {
     const [rows] = await pool.query(sql, params)
     const data = rows.map(r => {
       const save = parseJsonSafe(r.data, null)
-      const st = save && save.stats ? parseJsonSafe(save.stats, null) : null
+      const st = save && save.stats ? save.stats : null
       return {
         playerId: r.player_id,
         playerName: r.player_name,
@@ -1632,7 +1632,7 @@ app.get('/api/yishijie/admin/users', async (req, res) => {
 app.get('/api/yishijie/admin/player/:playerId', async (req, res) => {
   try {
     if (!requireAdmin(req, res)) return
-    const [rows] = await pool.query('SELECT * FROM users WHERE player_id = ? LIMIT 1', [req.params.playerId])
+    const [rows] = await pool.query('SELECT * FROM ysj_users WHERE player_id = ? LIMIT 1', [req.params.playerId])
     if (!rows.length) return json(res, 404, { error: '玩家不存在' })
     const save = await readSave(req.params.playerId)
     return json(res, 200, { success: true, data: { user: rows[0], save } })
@@ -1645,17 +1645,17 @@ app.delete('/api/yishijie/admin/player/:playerId', async (req, res) => {
   try {
     if (!requireAdmin(req, res)) return
     const pid = req.params.playerId
-    const [rows] = await pool.query('SELECT player_id FROM users WHERE player_id = ? LIMIT 1', [pid])
+    const [rows] = await pool.query('SELECT player_id FROM ysj_users WHERE player_id = ? LIMIT 1', [pid])
     if (!rows.length) return json(res, 404, { error: '玩家不存在' })
-    await pool.query('DELETE FROM users WHERE player_id = ?', [pid])
-    await pool.query('DELETE FROM saves WHERE player_id = ?', [pid])
-    await pool.query('DELETE FROM exchange_listings WHERE seller_id = ?', [pid])
-    await pool.query('DELETE FROM exchange_trade_history WHERE seller_id = ? OR buyer_id = ?', [pid, pid])
-    await pool.query('DELETE FROM recharge_orders WHERE player_id = ?', [pid])
-    await pool.query('DELETE FROM mail WHERE player_id = ?', [pid])
-    await pool.query('DELETE FROM redeem_uses WHERE player_id = ?', [pid])
-    await pool.query('DELETE FROM pvp_ratings WHERE player_id = ?', [pid])
-    await pool.query('DELETE FROM pvp_matches WHERE attacker_id = ? OR defender_id = ?', [pid, pid])
+    await pool.query('DELETE FROM ysj_users WHERE player_id = ?', [pid])
+    await pool.query('DELETE FROM ysj_saves WHERE player_id = ?', [pid])
+    await pool.query('DELETE FROM ysj_exchange_listings WHERE seller_id = ?', [pid])
+    await pool.query('DELETE FROM ysj_exchange_trade_history WHERE seller_id = ? OR buyer_id = ?', [pid, pid])
+    await pool.query('DELETE FROM ysj_recharge_orders WHERE player_id = ?', [pid])
+    await pool.query('DELETE FROM ysj_mail WHERE player_id = ?', [pid])
+    await pool.query('DELETE FROM ysj_redeem_uses WHERE player_id = ?', [pid])
+    await pool.query('DELETE FROM ysj_pvp_ratings WHERE player_id = ?', [pid])
+    await pool.query('DELETE FROM ysj_pvp_matches WHERE attacker_id = ? OR defender_id = ?', [pid, pid])
     return json(res, 200, { success: true, message: '已删除玩家及其全部数据' })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
@@ -1665,7 +1665,7 @@ app.delete('/api/yishijie/admin/player/:playerId', async (req, res) => {
 app.get('/api/yishijie/admin/saves', async (req, res) => {
   try {
     if (!requireAdmin(req, res)) return
-    const [rows] = await pool.query('SELECT s.player_id, u.player_name, s.updated_at FROM saves s JOIN users u ON u.player_id = s.player_id ORDER BY s.updated_at DESC LIMIT 200')
+    const [rows] = await pool.query('SELECT s.player_id, u.player_name, s.updated_at FROM ysj_saves s JOIN ysj_users u ON u.player_id = s.player_id ORDER BY s.updated_at DESC LIMIT 200')
     return json(res, 200, { success: true, data: rows })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
@@ -1675,7 +1675,7 @@ app.get('/api/yishijie/admin/saves', async (req, res) => {
 app.get('/api/yishijie/admin/listings', async (req, res) => {
   try {
     if (!requireAdmin(req, res)) return
-    const [rows] = await pool.query('SELECT * FROM exchange_listings ORDER BY id DESC LIMIT 200')
+    const [rows] = await pool.query('SELECT * FROM ysj_exchange_listings ORDER BY id DESC LIMIT 200')
     return json(res, 200, { success: true, data: rows })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
@@ -1689,9 +1689,9 @@ app.post('/api/yishijie/admin/rename', async (req, res) => {
     const { playerId, newName } = req.body || {}
     const name = sanitizeNickname(newName)
     if (!playerId || !name || name.length < 2) return json(res, 400, { error: '名称需 2-12 个字符' })
-    const [rows] = await pool.query('SELECT * FROM users WHERE player_id = ? LIMIT 1', [playerId])
+    const [rows] = await pool.query('SELECT * FROM ysj_users WHERE player_id = ? LIMIT 1', [playerId])
     if (!rows.length) return json(res, 404, { error: '玩家不存在' })
-    await pool.query('UPDATE users SET player_name = ?, name_changed = 1, name_changed_at = NOW() WHERE player_id = ?', [name, playerId])
+    await pool.query('UPDATE ysj_users SET player_name = ?, name_changed = 1, name_changed_at = NOW() WHERE player_id = ?', [name, playerId])
     return json(res, 200, { success: true, message: '已改名：' + name })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
@@ -1704,11 +1704,11 @@ app.post('/api/yishijie/admin/ban', async (req, res) => {
     if (!requireAdmin(req, res)) return
     const { playerId, reason } = req.body || {}
     if (!playerId) return json(res, 400, { error: '缺少玩家ID' })
-    const [rows] = await pool.query('SELECT * FROM users WHERE player_id = ? LIMIT 1', [playerId])
+    const [rows] = await pool.query('SELECT * FROM ysj_users WHERE player_id = ? LIMIT 1', [playerId])
     if (!rows.length) return json(res, 404, { error: '玩家不存在' })
     if (rows[0].banned) return json(res, 400, { error: '该玩家已被封号' })
-    await pool.query('UPDATE users SET banned = 1, ban_reason = ? WHERE player_id = ?', [String(reason || '违规行为').slice(0, 255), playerId])
-    await pool.query('DELETE FROM pvp_ratings WHERE player_id = ?', [playerId])
+    await pool.query('UPDATE ysj_users SET banned = 1, ban_reason = ? WHERE player_id = ?', [String(reason || '违规行为').slice(0, 255), playerId])
+    await pool.query('DELETE FROM ysj_pvp_ratings WHERE player_id = ?', [playerId])
     return json(res, 200, { success: true, message: '已封号' })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
@@ -1720,10 +1720,10 @@ app.post('/api/yishijie/admin/unban', async (req, res) => {
     if (!requireAdmin(req, res)) return
     const { playerId } = req.body || {}
     if (!playerId) return json(res, 400, { error: '缺少玩家ID' })
-    const [rows] = await pool.query('SELECT * FROM users WHERE player_id = ? LIMIT 1', [playerId])
+    const [rows] = await pool.query('SELECT * FROM ysj_users WHERE player_id = ? LIMIT 1', [playerId])
     if (!rows.length) return json(res, 404, { error: '玩家不存在' })
     if (!rows[0].banned) return json(res, 400, { error: '该玩家未被封号' })
-    await pool.query('UPDATE users SET banned = 0, ban_reason = "" WHERE player_id = ?', [playerId])
+    await pool.query('UPDATE ysj_users SET banned = 0, ban_reason = "" WHERE player_id = ?', [playerId])
     return json(res, 200, { success: true, message: '已解封' })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
@@ -1736,15 +1736,15 @@ app.post('/api/yishijie/punish', async (req, res) => {
     if (!requireAdmin(req, res)) return
     const { playerId, reason } = req.body || {}
     if (!playerId) return json(res, 400, { error: '缺少玩家ID' })
-    const [rows] = await pool.query('SELECT * FROM users WHERE player_id = ? LIMIT 1', [playerId])
+    const [rows] = await pool.query('SELECT * FROM ysj_users WHERE player_id = ? LIMIT 1', [playerId])
     if (!rows.length) return json(res, 404, { error: '玩家不存在' })
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
     let suffix = ''
     for (let i = 0; i < 6; i++) suffix += chars.charAt(Math.floor(Math.random() * chars.length))
     const newName = '违规昵称' + suffix
-    await pool.query('UPDATE users SET player_name = ?, name_changed = 1, name_changed_at = NOW(), banned = 1, ban_reason = ? WHERE player_id = ?',
+    await pool.query('UPDATE ysj_users SET player_name = ?, name_changed = 1, name_changed_at = NOW(), banned = 1, ban_reason = ? WHERE player_id = ?',
       [newName, String(reason || '违规行为').slice(0, 255), playerId])
-    await pool.query('DELETE FROM pvp_ratings WHERE player_id = ?', [playerId])
+    await pool.query('DELETE FROM ysj_pvp_ratings WHERE player_id = ?', [playerId])
     return json(res, 200, { success: true, newName, banned: true, message: '已制裁并封号' })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
@@ -1755,7 +1755,7 @@ app.post('/api/yishijie/punish', async (req, res) => {
 app.get('/api/yishijie/admin/banned-fingerprints', async (req, res) => {
   try {
     if (!requireAdmin(req, res)) return
-    const [rows] = await pool.query('SELECT * FROM banned_fingerprints ORDER BY created_at DESC')
+    const [rows] = await pool.query('SELECT * FROM ysj_banned_fingerprints ORDER BY created_at DESC')
     return json(res, 200, { success: true, data: rows })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
@@ -1767,7 +1767,7 @@ app.post('/api/yishijie/admin/banned-fingerprints', async (req, res) => {
     if (!requireAdmin(req, res)) return
     const { fingerprint, reason } = req.body || {}
     if (!fingerprint) return json(res, 400, { error: '缺少设备指纹' })
-    await pool.query('INSERT INTO banned_fingerprints (fingerprint, reason) VALUES (?, ?) ON DUPLICATE KEY UPDATE reason = VALUES(reason)',
+    await pool.query('INSERT INTO ysj_banned_fingerprints (fingerprint, reason) VALUES (?, ?) ON DUPLICATE KEY UPDATE reason = VALUES(reason)',
       [String(fingerprint), String(reason || '违规行为').slice(0, 255)])
     return json(res, 200, { success: true, message: '设备指纹已加入黑名单' })
   } catch (e) {
@@ -1779,7 +1779,7 @@ app.delete('/api/yishijie/admin/banned-fingerprints/:fingerprint', async (req, r
   try {
     if (!requireAdmin(req, res)) return
     const fp = decodeURIComponent(req.params.fingerprint)
-    await pool.query('DELETE FROM banned_fingerprints WHERE fingerprint = ?', [fp])
+    await pool.query('DELETE FROM ysj_banned_fingerprints WHERE fingerprint = ?', [fp])
     return json(res, 200, { success: true, message: '已移出黑名单' })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
@@ -1792,7 +1792,7 @@ app.post('/api/yishijie/admin/announcement', async (req, res) => {
     if (!requireAdmin(req, res)) return
     const { title, content } = req.body || {}
     if (!title || !content) return json(res, 400, { error: '缺少标题或内容' })
-    const [r] = await pool.query('INSERT INTO announcements (title, content) VALUES (?, ?)', [String(title).slice(0, 128), String(content)])
+    const [r] = await pool.query('INSERT INTO ysj_announcements (title, content) VALUES (?, ?)', [String(title).slice(0, 128), String(content)])
     return json(res, 200, { success: true, id: r.insertId })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
@@ -1802,7 +1802,7 @@ app.post('/api/yishijie/admin/announcement', async (req, res) => {
 app.get('/api/yishijie/admin/announcements', async (req, res) => {
   try {
     if (!requireAdmin(req, res)) return
-    const [rows] = await pool.query('SELECT * FROM announcements ORDER BY id DESC LIMIT 200')
+    const [rows] = await pool.query('SELECT * FROM ysj_announcements ORDER BY id DESC LIMIT 200')
     return json(res, 200, { success: true, data: rows })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
@@ -1812,7 +1812,7 @@ app.get('/api/yishijie/admin/announcements', async (req, res) => {
 app.delete('/api/yishijie/admin/announcement/:id', async (req, res) => {
   try {
     if (!requireAdmin(req, res)) return
-    await pool.query('DELETE FROM announcements WHERE id = ?', [parseInt(req.params.id, 10) || 0])
+    await pool.query('DELETE FROM ysj_announcements WHERE id = ?', [parseInt(req.params.id, 10) || 0])
     return json(res, 200, { success: true })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
@@ -1840,9 +1840,9 @@ app.post('/api/yishijie/rename', async (req, res) => {
     for (const w of SENSITIVE_WORDS) {
       if (lower.includes(w.toLowerCase())) return json(res, 400, { error: '名字包含违禁词，请重新输入' })
     }
-    const [dup] = await pool.query('SELECT player_id FROM users WHERE player_name = ? AND player_id <> ? LIMIT 1', [name, user.player_id])
+    const [dup] = await pool.query('SELECT player_id FROM ysj_users WHERE player_name = ? AND player_id <> ? LIMIT 1', [name, user.player_id])
     if (dup.length) return json(res, 409, { error: '该名字已被使用' })
-    await pool.query('UPDATE users SET player_name = ?, name_changed = 1, name_changed_at = NOW() WHERE player_id = ?', [name, user.player_id])
+    await pool.query('UPDATE ysj_users SET player_name = ?, name_changed = 1, name_changed_at = NOW() WHERE player_id = ?', [name, user.player_id])
     return json(res, 200, { success: true, playerName: name, message: '改名成功' })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
@@ -1852,7 +1852,7 @@ app.post('/api/yishijie/rename', async (req, res) => {
 async function initSchema() {
   try {
     await pool.query(
-      'CREATE TABLE IF NOT EXISTS pvp_match_logs (' +
+      'CREATE TABLE IF NOT EXISTS ysj_pvp_match_logs (' +
       'id INT AUTO_INCREMENT PRIMARY KEY, ' +
       'match_id INT NOT NULL, ' +
       'log_json LONGTEXT, ' +
@@ -1860,7 +1860,7 @@ async function initSchema() {
       ')'
     )
   } catch (e) {
-    console.error('初始化 pvp_match_logs 表失败:', e.message)
+    console.error('初始化 ysj_pvp_match_logs 表失败:', e.message)
   }
 }
 
