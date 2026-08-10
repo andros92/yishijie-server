@@ -129,9 +129,11 @@ function verifyAfdianSignature(rawBody, signature) {
 }
 
 async function findUserByFp(deviceFp, phoneFp) {
-  if (deviceFp) {
+  // 手环即身份：只要设备指纹有效，就只按设备指纹找账号，
+  // 绝不用手机指纹兜底——否则换一个手环也会被认成第一个账号
+  if (validFingerprint(deviceFp)) {
     const [rows] = await pool.query('SELECT * FROM users WHERE device_fingerprint = ? LIMIT 1', [deviceFp])
-    if (rows.length) return rows[0]
+    return rows.length ? rows[0] : null
   }
   if (phoneFp) {
     const [rows] = await pool.query('SELECT * FROM users WHERE phone_fingerprint = ? LIMIT 1', [phoneFp])
@@ -393,10 +395,11 @@ app.post('/api/yishijie/register', async (req, res) => {
       return json(res, 400, { error: '缺少玩家名称或设备指纹' })
     }
     let fp = deviceFingerprint
-    if (fp.length < 16 && !validFingerprint(phoneFingerprint)) {
+    if (!validFingerprint(fp) && !validFingerprint(phoneFingerprint)) {
       return json(res, 400, { error: '设备识别失败，无法注册。请确保手环和手机已正常连接。' })
     }
-    if (fp.length < 16 && validFingerprint(phoneFingerprint)) fp = 'phone_' + phoneFingerprint.slice(0, 32)
+    // 只有设备指纹缺失时才用手机指纹兜底；设备指纹有效就原样使用（防止双手环共用手机指纹串号）
+    if (!validFingerprint(fp)) fp = 'phone_' + phoneFingerprint.slice(0, 32)
     // 设备黑名单：被封禁的设备不允许注册/登录
     const bfp = await checkBannedFingerprint(fp)
     if (bfp) return json(res, 403, { error: '该设备已被封禁：' + (bfp.reason || '违规行为') + '。如有疑问请联系管理员。' })
