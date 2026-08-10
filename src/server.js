@@ -508,13 +508,14 @@ function requireCompanionChannel(req, res) {
 app.post('/api/yishijie/exchange/list', async (req, res) => {
   try {
     if (!requireCompanionChannel(req, res)) return
-    const { playerId, deviceFingerprint, apiKey, key, name, img, qty, price, quality, dur, maxDur, category, pet, uid, petCaseId, save } = req.body || {}
+    // save 重命名避免内部 const save = cloneSave(save) 触发 TDZ（Cannot access 'save' before initialization）
+    const { playerId, deviceFingerprint, apiKey, key, name, img, qty, price, quality, dur, maxDur, category, pet, uid, petCaseId, save: saveBody } = req.body || {}
     const user = await authUser(playerId, deviceFingerprint, apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
     if (!key || !(qty > 0) || !(price > 0)) return json(res, 400, { error: '参数不完整' })
     // 以手环提交的存档为准（服务器存档只是备份），串行化防止并发重复扣物
     return await withPlayerLock(user.player_id, async () => {
-    const save = cloneSave(save)
+    const save = cloneSave(saveBody)
     if (!save || !save.bag) return json(res, 400, { error: '手环存档缺失或不完整' })
     const stale = await ensureFreshSave(user.player_id, save)
     if (stale) return json(res, 409, { error: stale.error })
@@ -742,7 +743,7 @@ app.post('/api/yishijie/exchange/buy', async (req, res) => {
 app.post('/api/yishijie/exchange/cancel', async (req, res) => {
   try {
     if (!requireCompanionChannel(req, res)) return
-    const { listingId, playerId, deviceFingerprint, apiKey, save } = req.body || {}
+    const { listingId, playerId, deviceFingerprint, apiKey, save: saveBody } = req.body || {}
     const user = await authUser(playerId, deviceFingerprint, apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
     // 撤单加行锁：防止与并发购买竞态导致“已售出仍退款”（物品+金币双份）
@@ -761,7 +762,7 @@ app.post('/api/yishijie/exchange/cancel', async (req, res) => {
           return json(res, 403, { error: '只能撤自己的单' })
         }
         // 以手环提交的存档为准：物品直接退回这份存档
-        const save = cloneSave(save)
+        const save = cloneSave(saveBody)
         if (!save || !save.bag) {
           await conn.rollback()
           return json(res, 400, { error: '手环存档缺失或不完整' })
@@ -1010,7 +1011,7 @@ app.get('/api/yishijie/mail/:playerId', async (req, res) => {
 
 app.post('/api/yishijie/mail/claim', async (req, res) => {
   try {
-    const { playerId, deviceFingerprint, apiKey, mailId, save } = req.body || {}
+    const { playerId, deviceFingerprint, apiKey, mailId, save: saveBody } = req.body || {}
     const user = await authUser(playerId, deviceFingerprint, apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
     // 行锁 + 玩家写锁：防止并发领取同一封邮件导致奖励重复发放
@@ -1029,7 +1030,7 @@ app.post('/api/yishijie/mail/claim', async (req, res) => {
           return json(res, 200, { success: true, already: true })
         }
         // 以手环提交的存档为准：奖励直接加在这份存档上，服务器只留备份
-        const save = cloneSave(save)
+        const save = cloneSave(saveBody)
         if (!save) {
           await conn.rollback()
           return json(res, 400, { error: '手环存档缺失或不完整' })
