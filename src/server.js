@@ -513,7 +513,7 @@ app.post('/api/yishijie/exchange/list', async (req, res) => {
     if (!user) return json(res, 403, { error: '鉴权失败' })
     if (!key || !(qty > 0) || !(price > 0)) return json(res, 400, { error: '参数不完整' })
     // 以手环提交的存档为准（服务器存档只是备份），串行化防止并发重复扣物
-    return withPlayerLock(user.player_id, async () => {
+    return await withPlayerLock(user.player_id, async () => {
     const save = cloneSave(save)
     if (!save || !save.bag) return json(res, 400, { error: '手环存档缺失或不完整' })
     const stale = await ensureFreshSave(user.player_id, save)
@@ -648,7 +648,7 @@ app.post('/api/yishijie/exchange/buy', async (req, res) => {
     // 买家/卖家存档读写都串行化，防止并发购买/挂单/撤单互相覆盖
     // 锁按玩家 ID 排序获取，避免 A买B 与 B买A 同时发生时 AB-BA 死锁
     const lockIds = [buyer.player_id, pre[0].seller_id].sort()
-    return withPlayerLock(lockIds[0], () => withPlayerLock(lockIds[1], async () => {
+    return await withPlayerLock(lockIds[0], () => withPlayerLock(lockIds[1], async () => {
       const conn = await pool.getConnection()
       try {
         await conn.beginTransaction()
@@ -746,7 +746,7 @@ app.post('/api/yishijie/exchange/cancel', async (req, res) => {
     const user = await authUser(playerId, deviceFingerprint, apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
     // 撤单加行锁：防止与并发购买竞态导致“已售出仍退款”（物品+金币双份）
-    return withPlayerLock(user.player_id, async () => {
+    return await withPlayerLock(user.player_id, async () => {
       const conn = await pool.getConnection()
       try {
         await conn.beginTransaction()
@@ -875,7 +875,7 @@ async function creditOrder(orderId) {
   const order = rows[0]
   if (order.status === 'paid') return
   // 改用邮件到账：无论玩家有无存档，邮件一定送达，玩家在游戏里领取，避免无存档时丢金币
-  return withPlayerLock(order.player_id, async () => {
+  return await withPlayerLock(order.player_id, async () => {
     const [rows2] = await pool.query('SELECT * FROM ysj_recharge_orders WHERE order_id = ? LIMIT 1', [orderId])
     if (!rows2.length) throw new Error('订单不存在')
     if (rows2[0].status === 'paid') return
@@ -1014,7 +1014,7 @@ app.post('/api/yishijie/mail/claim', async (req, res) => {
     const user = await authUser(playerId, deviceFingerprint, apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
     // 行锁 + 玩家写锁：防止并发领取同一封邮件导致奖励重复发放
-    return withPlayerLock(user.player_id, async () => {
+    return await withPlayerLock(user.player_id, async () => {
       const conn = await pool.getConnection()
       try {
         await conn.beginTransaction()
