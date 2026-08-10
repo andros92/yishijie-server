@@ -22,7 +22,8 @@ const HOST = process.env.HOST || '0.0.0.0'
 const SECRET = process.env.YS_SECRET || 'change-this-secret'
 const COIN_PER_YUAN = Number(process.env.RECHARGE_COIN_PER_YUAN || 10000)
 const EXCHANGE_FEE_RATE = 0.10 // 平台手续费 10%
-const MAX_BODY = 2 * 1024 * 1024
+// 交易/邮件领取现在要携带整个手环存档，请求体上限放宽到 10MB
+const MAX_BODY = 10 * 1024 * 1024
 // 管理后台 Basic 认证（与垃圾佬后台一致，/admin 页面 + admin 接口共用）
 const ADMIN_USER = process.env.ADMIN_USER || 'shatangju'
 const ADMIN_PASS = process.env.ADMIN_PASS || 'change-this-admin-pass'
@@ -51,6 +52,23 @@ app.use(express.json({
   // 保留原始请求体，用于爱发电 webhook HMAC-SHA256 验签
   verify: (req, res, buf) => { req.rawBody = buf.toString('utf8') }
 }))
+
+// 请求日志：方便排查“服务端有没有收到请求/响应卡在哪”
+app.use((req, res, next) => {
+  const start = Date.now()
+  res.on('finish', () => {
+    console.log(`[req] ${req.method} ${req.path} -> ${res.statusCode} (${Date.now() - start}ms)`)
+  })
+  next()
+})
+
+// 崩溃日志：任何未捕获异常/未处理拒绝都打印堆栈，而不是静默挂掉
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason && (reason.stack || reason.message || reason))
+})
+process.on('uncaughtException', (e) => {
+  console.error('[uncaughtException]', e && e.stack ? e.stack : e)
+})
 
 function json(res, code, obj) {
   return res.status(code).json(obj)
