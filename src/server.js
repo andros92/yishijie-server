@@ -1887,10 +1887,13 @@ async function ensureFreshSave(playerId, save) {
   return null
 }
 
-initSchema().then(() => {
-  app.listen(PORT, HOST, () => {
-    console.log(`[异世界传说] 服务端已启动: http://${HOST}:${PORT}`)
-    console.log('  交易所手续费: ' + (EXCHANGE_FEE_RATE * 100) + '%')
-    console.log('  充值汇率: 1 元 = ' + COIN_PER_YUAN + ' 金币')
-  })
+// 先监听再初始化可选表：即使建表/数据库暂时异常，服务端也必须能启动，
+// 否则会整站 502（存档上传、挂单、排行榜全挂）
+app.listen(PORT, HOST, () => {
+  console.log(`[异世界传说] 服务端已启动: http://${HOST}:${PORT}`)
+  console.log('  交易所手续费: ' + (EXCHANGE_FEE_RATE * 100) + '%')
+  console.log('  充值汇率: 1 元 = ' + COIN_PER_YUAN + ' 金币')
+})
+initSchema().catch((e) => {
+  console.error('初始化 pvp_match_logs 表失败（不影响服务启动）:', e && e.message)
 })
