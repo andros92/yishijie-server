@@ -1286,10 +1286,18 @@ app.post('/api/yishijie/pvp/match', async (req, res) => {
       'INSERT INTO pvp_ratings (player_id, rating, wins, losses) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE rating = VALUES(rating), wins = wins + VALUES(wins), losses = losses + VALUES(losses)',
       [targetId, newRd, winFlag ? 0 : 1, winFlag ? 1 : 0]
     )
-    await pool.query(
+    const [matchIns] = await pool.query(
       'INSERT INTO pvp_matches (attacker_id, defender_id, attacker_win, rating_delta) VALUES (?, ?, ?, ?)',
       [user.player_id, targetId, winFlag ? 1 : 0, delta]
     )
+    try {
+      await pool.query(
+        'INSERT INTO pvp_match_logs (match_id, log_json) VALUES (?, ?)',
+        [matchIns.insertId, JSON.stringify(result.log || [])]
+      )
+    } catch (e) {
+      // 日志表异常不影响对战结算
+    }
     return json(res, 200, {
       success: true,
       winner: result.winner,
@@ -1311,6 +1319,61 @@ app.get('/api/yishijie/pvp/rating', async (req, res) => {
     const row = await getRatingRow(playerId)
     const used = await pvpDailyUsed(playerId)
     return json(res, 200, { success: true, rating: ratingOf(row), wins: row ? Number(row.wins) : 0, losses: row ? Number(row.losses) : 0, dailyLeft: Math.max(0, 12 - used) })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+// 竞技场段位排行榜（手机端查看）
+app.get('/api/yishijie/pvp/leaderboard', async (req, res) => {
+  try {
+    const { playerId, deviceFingerprint, apiKey } = req.query
+    const user = await authUser(playerId, deviceFingerprint, apiKey)
+    if (!user) return json(res, 403, { error: '鉴权失败' })
+    const [rows] = await pool.query(
+      'SELECT u.player_name, r.rating, r.wins, r.losses FROM pvp_ratings r JOIN users u ON u.player_id = r.player_id WHERE u.banned = 0 ORDER BY r.rating DESC, r.wins DESC LIMIT 50'
+    )
+    return json(res, 200, { success: true, data: rows })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
+// 我的对战记录（含战斗回放日志）
+app.get('/api/yishijie/pvp/matches', async (req, res) => {
+  try {
+    const { playerId, deviceFingerprint, apiKey } = req.query
+    const user = await authUser(playerId, deviceFingerprint, apiKey)
+    if (!user) return json(res, 403, { error: '鉴权失败' })
+    const [rows] = await pool.query(
+      `SELECT m.id, m.attacker_id, m.defender_id, m.attacker_win, m.rating_delta, m.created_at,
+              ua.player_name AS attacker_name, ud.player_name AS defender_name, l.log_json
+       FROM pvp_matches m
+       LEFT JOIN users ua ON ua.player_id = m.attacker_id
+       LEFT JOIN users ud ON ud.player_id = m.defender_id
+       LEFT JOIN pvp_match_logs l ON l.match_id = m.id
+       WHERE m.attacker_id = ? OR m.defender_id = ?
+       ORDER BY m.id DESC LIMIT 20`,
+      [user.player_id, user.player_id]
+    )
+    const list = rows.map((r) => {
+      const me = r.attacker_id === user.player_id
+      const win = me ? r.attacker_win === 1 : r.attacker_win === 0
+      const opp = me ? (r.defender_name || r.defender_id) : (r.attacker_name || r.attacker_id)
+      let log = []
+      if (r.log_json) {
+        try { log = JSON.parse(r.log_json) || [] } catch (e) { log = [] }
+      }
+      return {
+        id: r.id,
+        opponent: opp,
+        win: !!win,
+        delta: me ? Number(r.rating_delta) : -Number(r.rating_delta),
+        createdAt: r.created_at,
+        log: log
+      }
+    })
+    return json(res, 200, { success: true, data: list })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
   }
@@ -1732,8 +1795,25 @@ app.post('/api/yishijie/rename', async (req, res) => {
   }
 })
 
-app.listen(PORT, HOST, () => {
-  console.log(`[异世界传说] 服务端已启动: http://${HOST}:${PORT}`)
-  console.log('  交易所手续费: ' + (EXCHANGE_FEE_RATE * 100) + '%')
-  console.log('  充值汇率: 1 元 = ' + COIN_PER_YUAN + ' 金币')
+async function initSchema() {
+  try {
+    await pool.query(
+      'CREATE TABLE IF NOT EXISTS pvp_match_logs (' +
+      'id INT AUTO_INCREMENT PRIMARY KEY, ' +
+      'match_id INT NOT NULL, ' +
+      'log_json LONGTEXT, ' +
+      'created_at DATETIME DEFAULT CURRENT_TIMESTAMP' +
+      ')'
+    )
+  } catch (e) {
+    console.error('初始化 pvp_match_logs 表失败:', e.message)
+  }
+}
+
+initSchema().then(() => {
+  app.listen(PORT, HOST, () => {
+    console.log(`[异世界传说] 服务端已启动: http://${HOST}:${PORT}`)
+    console.log('  交易所手续费: ' + (EXCHANGE_FEE_RATE * 100) + '%')
+    console.log('  充值汇率: 1 元 = ' + COIN_PER_YUAN + ' 金币')
+  })
 })
