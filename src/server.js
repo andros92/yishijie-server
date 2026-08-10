@@ -1284,7 +1284,7 @@ app.get('/api/yishijie/pvp/defender', async (req, res) => {
 
 app.post('/api/yishijie/pvp/report', async (req, res) => {
   try {
-    const { playerId, deviceFingerprint, apiKey, targetId, win } = req.body || {}
+    const { playerId, deviceFingerprint, apiKey, targetId, win, log } = req.body || {}
     const user = await authUser(playerId, deviceFingerprint, apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
     if (!targetId || targetId === user.player_id) return json(res, 400, { error: '目标无效' })
@@ -1315,10 +1315,21 @@ app.post('/api/yishijie/pvp/report', async (req, res) => {
       'INSERT INTO ysj_pvp_ratings (player_id, rating, wins, losses) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE rating = VALUES(rating), wins = wins + VALUES(wins), losses = losses + VALUES(losses)',
       [targetId, newRd, winFlag ? 0 : 1, winFlag ? 1 : 0]
     )
-    await pool.query(
+    const [matchIns] = await pool.query(
       'INSERT INTO ysj_pvp_matches (attacker_id, defender_id, attacker_win, rating_delta) VALUES (?, ?, ?, ?)',
       [user.player_id, targetId, winFlag ? 1 : 0, delta]
     )
+    // 手环实时对战：把完整战斗流程存下来，供战绩回放
+    if (Array.isArray(log) && log.length) {
+      try {
+        await pool.query(
+          'INSERT INTO ysj_pvp_match_logs (match_id, log_json) VALUES (?, ?)',
+          [matchIns.insertId, JSON.stringify(log)]
+        )
+      } catch (e) {
+        // 日志表异常不影响对局结算
+      }
+    }
     return json(res, 200, { success: true, rating: newRa, delta, win: winFlag })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
