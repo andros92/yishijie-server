@@ -1543,8 +1543,8 @@ app.get('/api/yishijie/version', async (req, res) => {
     const ver = rows.length ? parseJsonSafe(rows[0].svalue, null) : null
     return json(res, 200, {
       success: true,
-      versionCode: ver ? Number(ver.versionCode) || 1 : 1,
-      versionName: (ver && ver.versionName) || '0.1.0',
+      versionCode: ver ? Number(ver.versionCode) || 2 : 2,
+      versionName: (ver && ver.versionName) || '0.1.1',
       downloadUrl: (ver && ver.downloadUrl) || '',
       updateNotes: (ver && ver.updateNotes) || ''
     })
@@ -1559,8 +1559,8 @@ app.post('/api/yishijie/admin/version', async (req, res) => {
     if (!requireAdmin(req, res)) return
     const { versionCode, versionName, downloadUrl, updateNotes } = req.body || {}
     const ver = {
-      versionCode: parseInt(versionCode, 10) || 1,
-      versionName: String(versionName || '0.1.0'),
+      versionCode: parseInt(versionCode, 10) || 2,
+      versionName: String(versionName || '0.1.1'),
       downloadUrl: String(downloadUrl || ''),
       updateNotes: String(updateNotes || '')
     }
