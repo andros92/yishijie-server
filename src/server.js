@@ -104,7 +104,9 @@ function sanitizeName(name) {
 }
 
 function validFingerprint(fp) {
-  return !!(fp && typeof fp === 'string' && fp.length >= 8 && fp !== 'NA' && fp !== 'unknown')
+  // 部分手环 getDeviceId 返回 unknown/NA/null/undefined，必须按无效处理
+  return !!(fp && typeof fp === 'string' && fp.length >= 8 &&
+    fp !== 'NA' && fp !== 'unknown' && fp !== 'null' && fp !== 'undefined')
 }
 
 function sign(str) {
