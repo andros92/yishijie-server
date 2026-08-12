@@ -460,7 +460,8 @@ app.post('/api/yishijie/login', async (req, res) => {
     const user = await findUserByFp(validFingerprint(deviceFingerprint) ? deviceFingerprint : '', phoneFingerprint || '')
     if (!user) return json(res, 404, { error: '该设备还没有账号，请先注册' })
     if (user.banned) return json(res, 403, { error: '该账号已被封禁：' + (user.ban_reason || '违规行为') })
-    return json(res, 200, { success: true, playerId: user.player_id, playerName: user.player_name, isNew: false })
+    // 登录也返回 apiKey：手机端重装/清数据后令牌丢失，可凭指纹登录把令牌补回来
+    return json(res, 200, { success: true, playerId: user.player_id, playerName: user.player_name, apiKey: user.api_key, isNew: false })
   } catch (e) {
     return json(res, 500, { error: '服务器错误：' + e.message })
   }
