@@ -530,7 +530,7 @@ app.post('/api/yishijie/exchange/list', async (req, res) => {
     if (category === 'pet') {
       // 宠物挂单：只能卖装在宠物栏（宠物栏物品）里的宠物，从 survival.pet_cases 移除
       if (!petCaseId) return json(res, 400, { error: '宠物必须装在宠物栏里才能出售' })
-      const [dupPc] = await pool.query('SELECT id FROM ysj_exchange_listings WHERE item_uid = ? AND status <> "cancelled" LIMIT 1', [petCaseId])
+      const [dupPc] = await pool.query('SELECT id FROM ysj_exchange_listings WHERE item_uid = ? AND status = "on" LIMIT 1', [petCaseId])
       if (dupPc.length) return json(res, 400, { error: '该宠物已在挂单中，不能重复上架' })
       if (!save.pet_cases || !save.pet_cases.list) save.pet_cases = { list: [] }
       const cases = save.pet_cases.list || []
@@ -571,7 +571,7 @@ app.post('/api/yishijie/exchange/list', async (req, res) => {
       }
       if (!inst) return json(res, 400, { error: '背包里没有这件装备' })
       if (!inst.uid) inst.uid = 'it_' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 6)
-      const [dupGear] = await pool.query('SELECT id FROM ysj_exchange_listings WHERE item_uid = ? AND status <> "cancelled" LIMIT 1', [inst.uid])
+      const [dupGear] = await pool.query('SELECT id FROM ysj_exchange_listings WHERE item_uid = ? AND status = "on" LIMIT 1', [inst.uid])
       if (dupGear.length) return json(res, 400, { error: '该装备已在挂单中，不能重复上架' })
       list.splice(idx, 1)
       if (!list.length && save.gear) delete save.gear[key]
