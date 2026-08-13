@@ -301,6 +301,50 @@ async function pvpDailyUsed(playerId) {
   return rows.length ? Number(rows[0].used) : 0
 }
 
+async function saveRestoreUsed(playerId) {
+  const [rows] = await pool.query('SELECT used FROM ysj_save_restore_daily WHERE player_id = ? AND day = ? LIMIT 1', [playerId, todayStr()])
+  return rows.length ? Number(rows[0].used) : 0
+}
+
+async function consumeSaveRestoreOnce(playerId) {
+  const conn = await pool.getConnection()
+  try {
+    await conn.beginTransaction()
+    const [rows] = await conn.query(
+      'SELECT used FROM ysj_save_restore_daily WHERE player_id = ? AND day = ? FOR UPDATE',
+      [playerId, todayStr()]
+    )
+    const used = rows.length ? Number(rows[0].used) : 0
+    if (used >= 1) {
+      await conn.rollback()
+      return { ok: false, error: '今天已恢复过存档（每日限 1 次），明天再来' }
+    }
+    const [saves] = await conn.query('SELECT data FROM ysj_saves WHERE player_id = ? LIMIT 1', [playerId])
+    if (!saves.length) {
+      await conn.rollback()
+      return { ok: false, error: '服务器上暂无存档，请先上传云存档' }
+    }
+    let data = null
+    try {
+      data = JSON.parse(saves[0].data)
+    } catch (e) {
+      await conn.rollback()
+      return { ok: false, error: '服务器存档格式异常' }
+    }
+    await conn.query(
+      'INSERT INTO ysj_save_restore_daily (player_id, day, used) VALUES (?, ?, 1) ON DUPLICATE KEY UPDATE used = used + 1',
+      [playerId, todayStr()]
+    )
+    await conn.commit()
+    return { ok: true, data }
+  } catch (e) {
+    try { await conn.rollback() } catch (e2) {}
+    throw e
+  } finally {
+    conn.release()
+  }
+}
+
 // 服务器端对战模拟（房间战用，双方快照 → 战报；与手环匹配战口径接近）
 function pvpBuildStats(save) {
   const cls = save && save.class ? save.class : null
@@ -472,6 +516,12 @@ app.get('/api/yishijie/saves/:playerId', async (req, res) => {
   try {
     const user = await authUser(req.params.playerId, req.query.deviceFingerprint, req.query.apiKey)
     if (!user) return json(res, 403, { error: '鉴权失败' })
+    const restore = req.query.restore === '1' || req.query.restore === 'true'
+    if (restore) {
+      const result = await consumeSaveRestoreOnce(user.player_id)
+      if (!result.ok) return json(res, 403, { error: result.error })
+      return json(res, 200, { success: true, data: result.data, restoreUsed: true })
+    }
     const data = await readSave(user.player_id)
     return json(res, 200, { success: true, data: data || null })
   } catch (e) {
@@ -2299,6 +2349,20 @@ app.delete('/api/yishijie/admin/player/:playerId', async (req, res) => {
   }
 })
 
+app.post('/api/yishijie/admin/reset-save-restore', async (req, res) => {
+  try {
+    if (!requireAdmin(req, res)) return
+    const { playerId } = req.body || {}
+    if (!playerId) return json(res, 400, { error: '缺少玩家ID' })
+    const [rows] = await pool.query('SELECT player_id FROM ysj_users WHERE player_id = ? LIMIT 1', [playerId])
+    if (!rows.length) return json(res, 404, { error: '玩家不存在' })
+    await pool.query('DELETE FROM ysj_save_restore_daily WHERE player_id = ? AND day = ?', [playerId, todayStr()])
+    return json(res, 200, { success: true, message: '已重置该玩家今日的存档恢复次数' })
+  } catch (e) {
+    return json(res, 500, { error: '服务器错误：' + e.message })
+  }
+})
+
 app.get('/api/yishijie/admin/saves', async (req, res) => {
   try {
     if (!requireAdmin(req, res)) return
@@ -2489,6 +2553,14 @@ app.post('/api/yishijie/rename', async (req, res) => {
 async function initSchema() {
   try {
     await pool.query(
+      'CREATE TABLE IF NOT EXISTS ysj_save_restore_daily (' +
+      'player_id VARCHAR(20) NOT NULL, ' +
+      'day VARCHAR(8) NOT NULL, ' +
+      'used INT NOT NULL DEFAULT 0, ' +
+      'PRIMARY KEY (player_id, day)' +
+      ')'
+    )
+    await pool.query(
       'CREATE TABLE IF NOT EXISTS ysj_pvp_match_logs (' +
       'id INT AUTO_INCREMENT PRIMARY KEY, ' +
       'match_id INT NOT NULL, ' +
@@ -2497,7 +2569,7 @@ async function initSchema() {
       ')'
     )
   } catch (e) {
-    console.error('初始化 ysj_pvp_match_logs 表失败:', e.message)
+    console.error('初始化可选表失败:', e.message)
   }
 }
 

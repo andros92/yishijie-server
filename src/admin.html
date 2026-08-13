@@ -177,6 +177,7 @@ async function loadPlayers() {
       '<td>' + (p.banned ? '<span class="tag tag-ban">已封禁</span>' : '<span class="tag tag-ok">正常</span>') + '</td>' +
       '<td><button class="btn btn-ghost" onclick="viewPlayer(\'' + p.playerId + '\')">存档</button>' +
       '<button class="btn btn-primary" onclick="renamePlayer(\'' + p.playerId + '\')">改名</button>' +
+      '<button class="btn btn-ghost" onclick="resetSaveRestore(\'' + p.playerId + '\')">重置恢复</button>' +
       (p.banned ? '<button class="btn btn-ghost" onclick="unbanPlayer(\'' + p.playerId + '\')">解封</button>'
                 : '<button class="btn btn-warn" onclick="banPlayer(\'' + p.playerId + '\')">封号</button>') +
       '<button class="btn btn-danger" onclick="punishPlayer(\'' + p.playerId + '\')">制裁</button>' +
@@ -187,6 +188,11 @@ async function viewPlayer(pid) {
   var d = await jget(API + '/admin/player/' + pid);
   if (!d.success) { alert(d.error || '获取失败'); return; }
   alert('玩家 ' + pid + ' 存档：\n\n' + JSON.stringify(d.data.save || {}, null, 2).substring(0, 3000));
+}
+async function resetSaveRestore(pid) {
+  if (!confirm('确认重置玩家 ' + pid + ' 今日的存档恢复次数？')) return;
+  var d = await jpost(API + '/admin/reset-save-restore', { playerId: pid });
+  alert(d.message || d.error || '完成');
 }
 async function renamePlayer(pid) {
   var name = prompt('输入新昵称（2-12字）：');

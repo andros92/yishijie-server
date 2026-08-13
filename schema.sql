@@ -154,6 +154,13 @@ CREATE TABLE IF NOT EXISTS pvp_daily (
   PRIMARY KEY (player_id, day)
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS save_restore_daily (
+  player_id VARCHAR(20) NOT NULL,
+  day VARCHAR(8) NOT NULL,
+  used INT NOT NULL DEFAULT 0,
+  PRIMARY KEY (player_id, day)
+) ENGINE=InnoDB;
+
 CREATE TABLE IF NOT EXISTS settings (
   skey VARCHAR(64) NOT NULL PRIMARY KEY,
   svalue VARCHAR(255) NOT NULL DEFAULT ''
